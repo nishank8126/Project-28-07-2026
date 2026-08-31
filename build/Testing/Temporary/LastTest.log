@@ -1,0 +1,151 @@
+Start testing: Aug 29 12:59 India Standard Time
+----------------------------------------------------------
+1/4 Testing: piece1_tests
+1/4 Test: piece1_tests
+Command: "H:/naksha lidar C C++/WorkstationCAD/build/Release/wk_tests.exe"
+Directory: H:/naksha lidar C C++/WorkstationCAD/build
+"piece1_tests" start time: Aug 29 12:59 India Standard Time
+Output:
+----------------------------------------------------------
+[PASS] TEST 1  simple direct store/retrieve
+[PASS] TEST 2  different variant slots
+[PASS] TEST 3  specialized sorted by min
+[PASS] TEST 4  validity range [5,20]
+[PASS] TEST 5  metric inside hit
+[PASS] TEST 6  metric outside miss
+[PASS] TEST 7  different transform miss
+[PASS] TEST 8  different variant miss
+[PASS] TEST 9  different style miss
+[PASS] TEST 10 different filter miss
+[PASS] TEST 11 overlapping allowed
+[PASS] TEST 12 invalidation clears
+[PASS] TEST 13 geometry revision invalidates
+
+========================================
+PASS: 13  FAIL: 0
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"piece1_tests" end time: Aug 29 12:59 India Standard Time
+"piece1_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/4 Testing: piece2_tests
+2/4 Test: piece2_tests
+Command: "H:/naksha lidar C C++/WorkstationCAD/build/Release/wk_tests2.exe"
+Directory: H:/naksha lidar C C++/WorkstationCAD/build
+"piece2_tests" start time: Aug 29 12:59 India Standard Time
+Output:
+----------------------------------------------------------
+[PASS] TEST 1  miss invokes provider once
+[PASS] TEST 2  command count recorded
+[PASS] TEST 3  second resolve is hit
+[PASS] TEST 4  different key rebuilds
+[PASS] TEST 5  metric outside rebuilds
+[PASS] TEST 6  metric inside reuses
+[PASS] TEST 7  nested bypasses cache lookup
+[PASS] TEST 8  nested commands in parent
+[PASS] TEST 9  scope restores on success
+[PASS] TEST 10 scope restores on exception
+[PASS] TEST 11 throwing no partial save
+[PASS] TEST 12 empty provider no cache
+[PASS] TEST 13 geometry revision invalidates
+
+========================================
+PASS: 13  FAIL: 0
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"piece2_tests" end time: Aug 29 12:59 India Standard Time
+"piece2_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/4 Testing: piece3_tests
+3/4 Test: piece3_tests
+Command: "H:/naksha lidar C C++/WorkstationCAD/build/Release/wk_tests3.exe"
+Directory: H:/naksha lidar C C++/WorkstationCAD/build
+"piece3_tests" start time: Aug 29 12:59 India Standard Time
+Output:
+----------------------------------------------------------
+[PASS] TEST 1  PathA ordering (no overrides)
+[PASS] TEST 2  PathB receives parameter
+[PASS] TEST 3  transform/clip passthrough
+[PASS] TEST 4  temporary override ordering
+[PASS] TEST 5  original overrides unchanged
+[PASS] TEST 6  submit throw restores+pops
+[PASS] TEST 7  submitB throw balanced
+[PASS] TEST 8  persistent in cache
+[PASS] TEST 9  transient not in cache
+[PASS] TEST 10 transient presented once
+[PASS] TEST 11 transient lifetime released
+[PASS] TEST 12 no graphics no submission
+[PASS] TEST 13 nested recording unchanged
+
+========================================
+PASS: 13  FAIL: 0
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"piece3_tests" end time: Aug 29 12:59 India Standard Time
+"piece3_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/4 Testing: piece4_tests
+4/4 Test: piece4_tests
+Command: "H:/naksha lidar C C++/WorkstationCAD/build/Release/wk_tests4.exe"
+Directory: H:/naksha lidar C C++/WorkstationCAD/build
+"piece4_tests" start time: Aug 29 12:59 India Standard Time
+Output:
+----------------------------------------------------------
+[PASS] P4A-A  Matrix row storage (M4)
+[PASS] P4A-B  Point4d raw multiply (M3)
+[PASS] P4A-C  Point4d in-place (M3)
+[PASS] P4A-D  Affine Point3d (M2)
+[PASS] P4A-E  Affine ignores 4th row (M2)
+[PASS] P4A-F  Affine in-place array (M2)
+[PASS] P4A-G  Affine count<=0 (M2)
+[PASS] P4A-H  Renorm W==1 (M1)
+[PASS] P4A-I  Renorm W==0 (M1)
+[PASS] P4A-J  Renorm W==2 (M1)
+[PASS] P4A-K  Renorm W==0.5 (M1)
+[PASS] P4A-L  Renorm in-place array (M1)
+[PASS] P4A-M  Product equation (M5)
+[PASS] P4A-N  Product order (M5)
+[PASS] P4A-O  Product alias left (M5)
+[PASS] P4A-P  Product alias right (M5)
+[PASS] P4A-Q  Transform3d row mapping (M6)
+[PASS] P4A-R  Translation column (M6)
+[PASS] P4A-S  Piece3 transform pass-through
+[PASS] P4A-T  Piece3 exception safety
+[PASS] P4B-A  m33==1 affine copy (M7)
+[PASS] P4B-B  m33==2 divide by 2 (M7)
+[PASS] P4B-C  m33==0 -> identity/false (M7)
+[PASS] P4B-D  persp zero, m33==1 true (M7)
+[PASS] P4B-E  persp sum below thresh (M7)
+[PASS] P4B-F  persp sum == thresh false (M7)
+[PASS] P4B-G  persp sum above thresh false (M7)
+[PASS] P4B-H  failure preserves output (M7)
+[PASS] P4B-I  negative m33 (M7)
+[PASS] P4B-J  round trip (M6+M7)
+[PASS] P4C-1  basic 3x3 vector multiply (M8)
+[PASS] P4C-2  translation ignored (M8)
+[PASS] P4C-3  fourth row ignored (M8)
+[PASS] P4C-4  exact in-place array (M8)
+[PASS] P4C-5  multiple vectors (M8)
+[PASS] P4C-6  count==0 untouched (M8)
+[PASS] P4C-7  count<0 untouched (M8)
+
+========================================
+PASS: 37  FAIL: 0
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"piece4_tests" end time: Aug 29 12:59 India Standard Time
+"piece4_tests" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Aug 29 12:59 India Standard Time

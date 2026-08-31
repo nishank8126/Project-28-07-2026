@@ -1,0 +1,10 @@
+^H:\NAKSHA LIDAR C C++\WORKSTATIONCAD\BUILD\CMAKEFILES\FFD76DF79CC6D3883A90A589A4A8CA82\RUN_TESTS_FORCE.RULE
+setlocal
+cd .
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

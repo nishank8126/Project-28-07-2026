@@ -1,0 +1,29 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project>
+  <ProjectOutputs>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\x64\Release\ZERO_CHECK</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\Release\wk_demo.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\Release\wk_tests.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\Release\wk_tests2.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\Release\wk_tests3.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\Release\wk_tests4.exe</FullPath>
+    </ProjectOutput>
+    <ProjectOutput>
+      <FullPath>H:\naksha lidar C C++\WorkstationCAD\build\x64\Release\ALL_BUILD</FullPath>
+    </ProjectOutput>
+  </ProjectOutputs>
+  <ContentFiles />
+  <SatelliteDlls />
+  <NonRecipeFileRefs />
+</Project>

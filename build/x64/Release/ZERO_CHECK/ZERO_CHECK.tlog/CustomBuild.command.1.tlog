@@ -1,0 +1,10 @@
+^H:\NAKSHA LIDAR C C++\WORKSTATIONCAD\BUILD\CMAKEFILES\FFD76DF79CC6D3883A90A589A4A8CA82\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" "-SH:/naksha lidar C C++/WorkstationCAD" "-BH:/naksha lidar C C++/WorkstationCAD/build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "H:/naksha lidar C C++/WorkstationCAD/build/WorkstationCAD.sln"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

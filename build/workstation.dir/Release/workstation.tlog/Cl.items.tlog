@@ -1,0 +1,11 @@
+H:\naksha lidar C C++\WorkstationCAD\src\core\Element.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\Element.obj
+H:\naksha lidar C C++\WorkstationCAD\src\core\Model.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\Model.obj
+H:\naksha lidar C C++\WorkstationCAD\src\core\Document.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\Document.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\CachedGraphics.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\CachedGraphics.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\GraphicsVariant.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\GraphicsVariant.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\ElementRef.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\ElementRef.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\GraphicsCache.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\GraphicsCache.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\GraphicsRecorder.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\GraphicsRecorder.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\ElementGraphicsService.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\ElementGraphicsService.obj
+H:\naksha lidar C C++\WorkstationCAD\src\display\RetainedGraphicsPresenter.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\RetainedGraphicsPresenter.obj
+H:\naksha lidar C C++\WorkstationCAD\src\math\MathConstants.cpp;H:\naksha lidar C C++\WorkstationCAD\build\workstation.dir\Release\MathConstants.obj

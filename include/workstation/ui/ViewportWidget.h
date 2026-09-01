@@ -36,6 +36,9 @@ public:
     quint64 GetLoadedPointCount() const;
     void GetLoadedExtent(double& sizeX, double& sizeY, double& sizeZ) const;
 
+    // mode is a workstation::renderer::VisualizationMode value.
+    void SetVisualizationMode(int mode);
+
 signals:
     void statusChanged(const QString& text);
 

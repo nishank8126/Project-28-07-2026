@@ -9,8 +9,17 @@ VulkanAllocator& VulkanAllocator::Get() {
 }
 
 void VulkanAllocator::Initialize(VkInstance instance, VkPhysicalDevice physicalDevice,
-                                  VkDevice device, const VmaVulkanFunctions& vulkanFunctions) {
+                                  VkDevice device, VkQueue graphicsQueue,
+                                  uint32_t graphicsFamilyIndex,
+                                  const VmaVulkanFunctions& vulkanFunctions) {
     device_ = device;
+    graphicsQueue_ = graphicsQueue;
+
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = graphicsFamilyIndex;
+    vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_);
 
     VmaAllocatorCreateInfo allocatorInfo{};
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
@@ -28,6 +37,12 @@ void VulkanAllocator::Shutdown() {
         vmaDestroyAllocator(allocator_);
         allocator_ = VK_NULL_HANDLE;
     }
+    if (commandPool_) {
+        vkDestroyCommandPool(device_, commandPool_, nullptr);
+        commandPool_ = VK_NULL_HANDLE;
+    }
+    graphicsQueue_ = VK_NULL_HANDLE;
+    device_ = VK_NULL_HANDLE;
 }
 
 GPUBuffer VulkanAllocator::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
@@ -100,6 +115,16 @@ void VulkanAllocator::DestroyImage(GPUImage& image) {
     }
 }
 
+void VulkanAllocator::CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size) {
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+
+    VkBufferCopy copyRegion{};
+    copyRegion.size = size;
+    vkCmdCopyBuffer(cmd, srcBuffer, dstBuffer, 1, &copyRegion);
+
+    EndSingleTimeCommands(cmd);
+}
+
 VulkanAllocator::Stats VulkanAllocator::GetStats() const {
     Stats result = stats_;
     VmaTotalStatistics vmaStats;
@@ -107,6 +132,38 @@ VulkanAllocator::Stats VulkanAllocator::GetStats() const {
     result.totalUsed = vmaStats.total.statistics.blockBytes;
     result.allocationCount = vmaStats.total.unusedRangeCount;
     return result;
+}
+
+VkCommandBuffer VulkanAllocator::BeginSingleTimeCommands() {
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = commandPool_;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    vkAllocateCommandBuffers(device_, &allocInfo, &cmd);
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    return cmd;
+}
+
+void VulkanAllocator::EndSingleTimeCommands(VkCommandBuffer cmd) {
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+
+    vkQueueSubmit(graphicsQueue_, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue_);
+
+    vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
 }
 
 } // namespace vulkan

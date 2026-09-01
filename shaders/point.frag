@@ -19,6 +19,12 @@ layout(push_constant) uniform PushConstants {
 };
 
 void main() {
+    if (visualizationMode == 11u) {
+        // DEBUG mode: no discard, no fade, just solid color
+        outColor = vec4(1.0, 0.0, 0.0, 1.0);
+        return;
+    }
+
     vec2 center = gl_PointCoord - vec2(0.5);
     float dist = length(center);
 

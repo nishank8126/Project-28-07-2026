@@ -32,7 +32,9 @@ public:
     static VulkanAllocator& Get();
 
     void Initialize(VkInstance instance, VkPhysicalDevice physicalDevice,
-                    VkDevice device, const VmaVulkanFunctions& vulkanFunctions);
+                    VkDevice device, VkQueue graphicsQueue,
+                    uint32_t graphicsFamilyIndex,
+                    const VmaVulkanFunctions& vulkanFunctions);
     void Shutdown();
 
     GPUBuffer CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
@@ -45,6 +47,8 @@ public:
                          VmaMemoryUsage memoryUsage = VMA_MEMORY_USAGE_GPU_ONLY);
 
     void DestroyImage(GPUImage& image);
+
+    void CopyBuffer(VkBuffer srcBuffer, VkBuffer dstBuffer, VkDeviceSize size);
 
     VkCommandBuffer BeginSingleTimeCommands();
     void EndSingleTimeCommands(VkCommandBuffer commandBuffer);

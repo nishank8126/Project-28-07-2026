@@ -114,6 +114,7 @@ private:
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
 
     VkPipeline pointPipeline_ = VK_NULL_HANDLE;
+    VkPipeline debugPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pointPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout pointDescriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pointDescriptorPool_ = VK_NULL_HANDLE;
@@ -135,6 +136,7 @@ private:
     bool CreateRenderPass();
     bool CreateFramebuffers();
     bool CreatePointPipeline();
+    bool CreateDebugPipeline();
     bool CreateDescriptorResources();
 
     void UpdatePushConstants(VkCommandBuffer cmd);

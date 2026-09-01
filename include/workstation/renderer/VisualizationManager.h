@@ -8,18 +8,23 @@ namespace renderer {
 
 class RenderContext;
 
+// NOTE: this order must match shaders/point.vert and point.frag's
+// `switch (visualizationMode)` case numbers exactly (their case bodies were
+// authored in this order: RGB=0 .. NormalShading=5, Density=6), not the
+// order the modes happen to be listed/described elsewhere.
 enum class VisualizationMode {
     RGB,
     Intensity,
     Classification,
     Elevation,
     HeightRamp,
-    Density,
     NormalShading,
+    Density,
     ReturnNumber,
     ScanAngle,
     gpsTime,
-    User
+    User,
+    Debug
 };
 
 struct VisualizationPreset {

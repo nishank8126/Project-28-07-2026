@@ -55,6 +55,16 @@ vec3 HeightRamp(float normalizedHeight) {
 
 void main() {
     vec4 pos = vec4(inPosition, 1.0);
+
+    if (visualizationMode == 11u) {
+        // DEBUG mode: bypass everything, just project and use fixed size
+        gl_Position = viewProjection * pos;
+        vertOutput.color = vec4(1.0, 0.0, 0.0, 1.0);
+        vertOutput.depth = gl_Position.w;
+        gl_PointSize = 5.0;
+        return;
+    }
+
     vec4 viewPos = viewProjection * pos;
     gl_Position = viewPos;
 
@@ -73,11 +83,14 @@ void main() {
             visualColor = vec4(ClassifyColor(inClassification), 1.0);
             break;
         case 3:
-            float h = clamp((inPosition.y - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
+            // Elevation: LAS/LiDAR data is Z-up (Z = true elevation); the
+            // renderer's camera worldUp is Y purely for orbit/pan controls
+            // and is unrelated to which source axis is "height".
+            float h = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
             visualColor = vec4(vec3(h), 1.0);
             break;
         case 4:
-            float h4 = clamp((inPosition.y - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
+            float h4 = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
             visualColor = vec4(HeightRamp(h4), 1.0);
             break;
         case 5:

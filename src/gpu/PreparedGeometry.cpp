@@ -1,4 +1,5 @@
 #include "workstation/gpu/PreparedGeometry.h"
+#include "workstation/vulkan/VulkanAllocator.h"
 
 namespace workstation {
 namespace gpu {
@@ -35,15 +36,27 @@ GeometryAttribute PreparedGeometry::CreateAttribute(uint32_t elementSize,
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo{};
-    allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
-    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+    allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
     vmaCreateBuffer(allocator_->GetAllocator(), &bufferInfo, &allocInfo,
                     &attr.buffer, &attr.allocation, &attr.allocationInfo);
     attr.size = size;
     attr.elementSize = elementSize;
     attr.elementCount = elementCount;
-    attr.isMapped = (attr.allocationInfo.pMappedData != nullptr);
+
+    if (attr.allocationInfo.pMappedData) {
+        attr.isMapped = true;
+    } else {
+        void* mapped = nullptr;
+        VkResult result = vmaMapMemory(allocator_->GetAllocator(), attr.allocation, &mapped);
+        if (result == VK_SUCCESS && mapped) {
+            attr.allocationInfo.pMappedData = mapped;
+            attr.isMapped = true;
+        } else {
+            attr.isMapped = false;
+        }
+    }
 
     if (data && attr.isMapped) {
         memcpy(attr.allocationInfo.pMappedData, data, size);

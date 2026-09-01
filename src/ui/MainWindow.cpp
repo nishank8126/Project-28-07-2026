@@ -5,6 +5,7 @@
 #include "workstation/ui/ToolSettingsWidget.h"
 
 #include <QMenuBar>
+#include <QActionGroup>
 #include <QToolBar>
 #include <QStatusBar>
 #include <QDockWidget>
@@ -90,7 +91,31 @@ void MainWindow::buildMenu() {
     tgTools->setChecked(true);
     connect(tgTools, &QAction::toggled, this, &MainWindow::toggleToolSettings);
 
-    menuBar()->addMenu("&Tools");  // no CAD tools implemented in GUI Shell 1
+    QMenu* toolsMenu = menuBar()->addMenu("&Tools");
+    QMenu* vizMenu = toolsMenu->addMenu("&Visualization");
+    auto* vizGroup = new QActionGroup(this);
+    vizGroup->setExclusive(true);
+
+    struct VizModeEntry { const char* label; int mode; };
+    // Values match workstation::renderer::VisualizationMode. Modes without
+    // backing data (ReturnNumber/ScanAngle/gpsTime/User) are omitted.
+    static const VizModeEntry kVizModes[] = {
+        {"RGB", 0},
+        {"Intensity", 1},
+        {"Classification", 2},
+        {"Elevation", 3},
+        {"Height Ramp", 4},
+        {"Normal Shading", 5},
+        {"Density", 6},
+    };
+    for (const auto& entry : kVizModes) {
+        QAction* act = vizMenu->addAction(entry.label);
+        act->setCheckable(true);
+        act->setChecked(entry.mode == 0);
+        act->setActionGroup(vizGroup);
+        int mode = entry.mode;
+        connect(act, &QAction::triggered, this, [this, mode]() { onVisualizationModeSelected(mode); });
+    }
 
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     QAction* aboutAct = helpMenu->addAction("&About WorkstationCAD");
@@ -111,6 +136,10 @@ void MainWindow::buildStatusBar() {
 
 void MainWindow::onExit() {
     close();
+}
+
+void MainWindow::onVisualizationModeSelected(int mode) {
+    m_viewport->SetVisualizationMode(mode);
 }
 
 void MainWindow::onOpenFile() {

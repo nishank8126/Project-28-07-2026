@@ -263,3 +263,23 @@ add_test(NAME piece_pod_integration COMMAND wk_pod_integration_tests)
 add_executable(wk_renderer app/renderer_main.cpp)
 target_link_libraries(wk_renderer PRIVATE workstation)
 target_include_directories(wk_renderer PRIVATE include)
+
+# Auto-compile GLSL shaders to SPIR-V when source changes
+find_program(GLSLC glslc HINTS "H:/Tools/Bin")
+if(GLSLC)
+    set(SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
+    set(SHADER_DST_DIR ${CMAKE_BINARY_DIR}/shaders)
+    file(MAKE_DIRECTORY ${SHADER_DST_DIR})
+    foreach(SHADER point.vert point.frag)
+        add_custom_command(
+            OUTPUT ${SHADER_DST_DIR}/${SHADER}.spv
+            COMMAND ${GLSLC} ${SHADER_SRC_DIR}/${SHADER} -o ${SHADER_DST_DIR}/${SHADER}.spv
+            DEPENDS ${SHADER_SRC_DIR}/${SHADER}
+            COMMENT "Compiling ${SHADER} -> ${SHADER}.spv"
+        )
+    endforeach()
+    add_custom_target(shaders ALL DEPENDS ${SHADER_DST_DIR}/point.vert.spv ${SHADER_DST_DIR}/point.frag.spv)
+    add_dependencies(wk_renderer shaders)
+else()
+    message(WARNING "glslc not found - shaders will not be auto-compiled")
+endif()

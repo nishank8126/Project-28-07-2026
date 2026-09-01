@@ -88,7 +88,7 @@ LODSelectionResult LODManager::SelectNodes(
     const Camera& camera,
     uint32_t viewportWidth,
     uint32_t viewportHeight,
-    const ViewportPointBudget& budget,
+    ViewportPointBudget& budget,
     const pointcloud::PointCloud* cloud,
     VisibilityCache& visCache,
     uint32_t frameNumber) {
@@ -173,6 +173,7 @@ LODSelectionResult LODManager::SelectNodes(
 
         if (budget.CanAllocatePoints(candidate.pointCount)) {
             selected = true;
+            budget.AllocatePoints(candidate.pointCount);
             budgetUsed += candidate.pointCount;
             selectedPointCount_ += candidate.pointCount;
             selectedNodes_.push_back(candidate);

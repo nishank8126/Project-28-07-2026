@@ -1,5 +1,6 @@
 #include "workstation/ui/ViewportWidget.h"
 #include "workstation/renderer/Renderer.h"
+#include "workstation/renderer/VisualizationManager.h"
 #include "workstation/pointcloud/PointCloud.h"
 #include "workstation/pointcloud/LasFileReader.h"
 
@@ -62,7 +63,14 @@ bool ViewportWindow::InitializeRenderer() {
     // send it to the renderer and re-frame the camera on the cloud bounds.
     if (m_cloud && m_cloud->Root()) {
         m_renderer->SetPointCloud(m_cloud.get());
-        cam.FocusOnBounds(m_cloud->Root()->bounds());
+        auto bounds = m_cloud->Root()->bounds();
+        cam.FocusOnBounds(bounds);
+
+        auto& cfg = m_renderer->GetContext().GetConfig();
+        // LAS/LiDAR source data is Z-up (Z = true elevation); see the
+        // matching comment in shaders/point.vert's Elevation/HeightRamp cases.
+        cfg.elevationMin = static_cast<float>(bounds.minZ);
+        cfg.elevationMax = static_cast<float>(bounds.maxZ);
     }
 
     emit statusChanged("Renderer: ready");
@@ -83,8 +91,20 @@ bool ViewportWindow::LoadPointCloudFile(const QString& path, QString* errorMessa
         auto bounds = m_cloud->Root() ? m_cloud->Root()->bounds() : pointcloud::BoundingBox{};
         auto& cam = m_renderer->GetContext().GetCamera();
         cam.FocusOnBounds(bounds);
+
+        auto& cfg = m_renderer->GetContext().GetConfig();
+        // LAS/LiDAR source data is Z-up (Z = true elevation); see the
+        // matching comment in shaders/point.vert's Elevation/HeightRamp cases.
+        cfg.elevationMin = static_cast<float>(bounds.minZ);
+        cfg.elevationMax = static_cast<float>(bounds.maxZ);
     }
     return true;
+}
+
+void ViewportWindow::SetVisualizationMode(int mode) {
+    if (!m_rendererInitialized) return;
+    m_renderer->GetContext().GetConfig().visualizationMode =
+        static_cast<renderer::VisualizationMode>(mode);
 }
 
 quint64 ViewportWindow::GetLoadedPointCount() const {

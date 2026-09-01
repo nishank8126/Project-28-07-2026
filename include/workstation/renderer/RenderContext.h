@@ -26,6 +26,8 @@ struct RenderConfig {
     float pointSize = 2.0f;
     float intensityMin = 0.0f;
     float intensityMax = 1.0f;
+    float elevationMin = 0.0f;
+    float elevationMax = 1000.0f;
     bool showBoundingBoxes = false;
     bool showLODColors = false;
     bool showVisibleNodes = false;

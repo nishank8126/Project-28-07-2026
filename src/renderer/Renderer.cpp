@@ -6,6 +6,19 @@
 #include <chrono>
 #include <cstdio>
 
+#ifdef _WIN32
+#include <windows.h>
+static std::string GetExeShaderDir() {
+    char buf[MAX_PATH] = {};
+    DWORD len = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return "shaders/";
+    std::string exePath(buf, len);
+    auto pos = exePath.find_last_of("\\/");
+    if (pos == std::string::npos) return "shaders/";
+    return exePath.substr(0, pos + 1) + "shaders/";
+}
+#endif
+
 namespace workstation {
 namespace renderer {
 
@@ -112,9 +125,11 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
     vmaFuncs.vkGetDeviceProcAddr = vkGetDeviceProcAddr;
     vmaFuncs.vkGetPhysicalDeviceProperties = vkGetPhysicalDeviceProperties;
     vmaFuncs.vkGetPhysicalDeviceMemoryProperties = vkGetPhysicalDeviceMemoryProperties;
+    auto queueFamilies = device_->GetQueueFamilies();
     vulkan::VulkanAllocator::Get().Initialize(
         instance_->GetInstance(), physDev.GetDevice(),
-        device_->GetDevice(), vmaFuncs);
+        device_->GetDevice(), device_->GetGraphicsQueue(),
+        queueFamilies.graphicsFamily, vmaFuncs);
 
     descriptorManager_ = std::make_unique<vulkan::VulkanDescriptorManager>();
     descriptorManager_->Initialize(device_->GetDevice());
@@ -168,6 +183,10 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreatePointPipeline failed\n");
         return false;
     }
+    if (!CreateDebugPipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreateDebugPipeline failed\n");
+        return false;
+    }
 
     context_.SetViewportSize(config.initialWidth, config.initialHeight);
     context_.GetVisibilitySystem().Initialize(&spatialTree_);
@@ -203,6 +222,7 @@ void Renderer::Shutdown() {
     framebuffers_.clear();
 
     if (pointPipeline_) pipelineManager_->DestroyPipeline(pointPipeline_);
+    if (debugPipeline_) pipelineManager_->DestroyPipeline(debugPipeline_);
     if (pointPipelineLayout_) pipelineManager_->DestroyPipelineLayout(pointPipelineLayout_);
     if (pointDescriptorLayout_) descriptorManager_->DestroyLayout(pointDescriptorLayout_);
     if (pointDescriptorPool_) descriptorManager_->DestroyPool(pointDescriptorPool_);
@@ -306,21 +326,23 @@ void Renderer::RenderFrame() {
 
     if (activeCloud_) {
         auto& cfg = context_.GetConfig();
+        bool useDebug = (cfg.visualizationMode == VisualizationMode::Debug);
 
-        if (cfg.forceDrawAll) {
+        if (cfg.forceDrawAll || useDebug) {
             // Debug mode: bypass visibility/LOD, draw all prepared geometry directly
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+            VkPipeline activePipeline = useDebug ? debugPipeline_ : pointPipeline_;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
             UpdatePushConstants(cmd);
 
             for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
                 if (!geo || geo->GetPointCount() == 0) continue;
+
                 geo->BindPosition(cmd, 0);
                 geo->BindColor(cmd, 1);
                 geo->BindIntensity(cmd, 2);
                 geo->BindClassification(cmd, 3);
                 geo->BindNormal(cmd, 4);
-                fprintf(stderr, "[Renderer] FORCE DRAW: key=%llu pointCount=%u\n",
-                        key, geo->GetPointCount());
+
                 geo->Draw(cmd);
                 context_.GetStats().drawCalls++;
             }
@@ -329,10 +351,6 @@ void Renderer::RenderFrame() {
             PerformLODSelection();
             ProcessStreamingRequests();
             UpdateGPUResidency();
-
-            fprintf(stderr, "[Renderer] Frame %u: visible=%zu selected=%zu visPoints=%llu drawCalls=%u\n",
-                    frameNumber_, visibleNodeKeys_.size(), selectedNodeKeys_.size(),
-                    context_.GetStats().visiblePoints, context_.GetStats().drawCalls);
 
             if (!selectedNodeKeys_.empty()) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
@@ -422,18 +440,8 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
         if (root) {
             fprintf(stderr, "[Renderer] SetPointCloud: %llu points, cloud='%s'\n",
                     cloud->PointCount(), cloud->Name());
-            fprintf(stderr, "[Renderer] Cloud bounds: min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)\n",
-                    root->bounds().minX, root->bounds().minY, root->bounds().minZ,
-                    root->bounds().maxX, root->bounds().maxY, root->bounds().maxZ);
-            fprintf(stderr, "[Renderer] PreparedGeometry: pointCount=%u, gpuMem=%llu bytes\n",
-                    prepGeo ? prepGeo->GetPointCount() : 0,
-                    prepGeo ? prepGeo->GetGPUMemoryBytes() : 0);
 
             context_.GetCamera().FocusOnBounds(root->bounds());
-            auto& cam = context_.GetCamera();
-            fprintf(stderr, "[Renderer] Camera: pos=(%.3f, %.3f, %.3f) target=(%.3f, %.3f, %.3f)\n",
-                    cam.GetPosition().x, cam.GetPosition().y, cam.GetPosition().z,
-                    cam.GetTarget().x, cam.GetTarget().y, cam.GetTarget().z);
 
             BuildSpatialTreeFromCloud(*cloud);
 
@@ -528,7 +536,8 @@ void Renderer::PerformLODSelection() {
     lodManager.GetConfig().visiblePointBudget =
         static_cast<uint64_t>(cfg.pointBudgetMillions * 1'000'000.0);
 
-    pointBudget.SetConfig({cfg.maxPointsPerFrame, 100'000'000, 1000, cfg.lodEnabled});
+    pointBudget.SetConfig({cfg.maxPointsPerFrame, 100'000'000, 1000, true});
+    pointBudget.BeginFrame();
 
     auto result = lodManager.SelectNodes(
         visibleNodeKeys_,
@@ -581,6 +590,12 @@ void Renderer::ProcessStreamingRequests() {
     auto& streamingStats = context_.GetStreamingDebugStats();
 
     for (const auto& node : selectedNodes) {
+        // Nodes the adapter already uploaded directly (PreparePointCloud)
+        // are drawable without the streaming pipeline; requesting them here
+        // every frame forever (since they never become "resident" from the
+        // streaming manager's point of view) wastes CPU/GPU work each frame.
+        if (adapter_.GetPreparedGeometry(node.nodeKey) != nullptr) continue;
+
         if (!streamingManager_->IsNodeResident(node.nodeKey)) {
             float priority = static_cast<float>(node.screenSpaceError) * 1000.0f;
             streamingManager_->RequestNode(node.nodeKey, priority,
@@ -621,8 +636,6 @@ void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
         geo->BindClassification(cmd, 3);
         geo->BindNormal(cmd, 4);
 
-        fprintf(stderr, "[Renderer] vkCmdDraw: key=%llu pointCount=%u gpuMem=%llu\n",
-                key, geo->GetPointCount(), geo->GetGPUMemoryBytes());
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
@@ -693,8 +706,14 @@ bool Renderer::CreateFramebuffers() {
 }
 
 bool Renderer::CreatePointPipeline() {
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
     const char* basePath = SDL_GetBasePath();
     std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+    fprintf(stderr, "[Renderer] Shader dir: %s\n", shaderDir.c_str());
+    fflush(stderr);
 
     auto shaders = shaderManager_->LoadSPIRVFiles({
         {shaderDir + "point.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
@@ -734,6 +753,52 @@ bool Renderer::CreatePointPipeline() {
     return pointPipeline_ != VK_NULL_HANDLE;
 }
 
+bool Renderer::CreateDebugPipeline() {
+    // Debug pipeline uses the same shaders but with depth test OFF, cull mode NONE.
+    // Activated when visualizationMode == Debug via push constants.
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+
+    auto shaders = shaderManager_->LoadSPIRVFiles({
+        {shaderDir + "point.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
+        {shaderDir + "point.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
+    });
+    for (auto& shader : shaders) {
+        if (shader.module == VK_NULL_HANDLE) {
+            fprintf(stderr, "Renderer::CreateDebugPipeline: failed to load shaders\n");
+            return false;
+        }
+    }
+
+    // Reuse the same pipeline layout (same push constants)
+    vulkan::PipelineConfig pconfig;
+    pconfig.SetDefaults();
+    pconfig.colorFormat = swapchain_->GetImageFormat();
+    // Depth test OFF — points always pass
+    pconfig.depthStencil.depthTestEnable = VK_FALSE;
+    pconfig.depthStencil.depthWriteEnable = VK_FALSE;
+    // No culling
+    pconfig.rasterizer.cullMode = VK_CULL_MODE_NONE;
+    // Wider points for visibility
+    pconfig.rasterizer.lineWidth = 1.0f;
+
+    debugPipeline_ = pipelineManager_->CreateGraphicsPipeline(
+        pointPipelineLayout_, shaders, pconfig, renderPass_->GetRenderPass());
+
+    for (auto& shader : shaders) {
+        shaderManager_->DestroyShaderModule(shader.module);
+    }
+
+    fprintf(stderr, "[Renderer] Debug pipeline created: %s\n",
+            debugPipeline_ != VK_NULL_HANDLE ? "OK" : "FAILED");
+    fflush(stderr);
+    return debugPipeline_ != VK_NULL_HANDLE;
+}
+
 bool Renderer::CreateDescriptorResources() {
     return true;
 }
@@ -765,8 +830,8 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.visualizationMode = static_cast<uint32_t>(cfg.visualizationMode);
     pc.intensityMin = cfg.intensityMin;
     pc.intensityMax = cfg.intensityMax;
-    pc.elevationMin = visualizationManager_.GetElevationMin();
-    pc.elevationMax = visualizationManager_.GetElevationMax();
+    pc.elevationMin = cfg.elevationMin;
+    pc.elevationMax = cfg.elevationMax;
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

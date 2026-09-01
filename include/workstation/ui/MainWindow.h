@@ -33,6 +33,7 @@ private slots:
     void toggleModelTree(bool visible);
     void toggleProperties(bool visible);
     void toggleToolSettings(bool visible);
+    void onVisualizationModeSelected(int mode);
 
 private:
     void buildMenu();

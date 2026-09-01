@@ -1,5 +1,0 @@
-piece1_tests 4 0.0140884
-piece2_tests 4 0.00742405
-piece3_tests 4 0.00783363
-piece4_tests 4 0.00731925
----

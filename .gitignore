@@ -1,0 +1,47 @@
+# Build directories
+build/
+build-gui/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+CMakeUserPresets.json
+install_manifest.txt
+
+# Compiled objects / binaries
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.exe
+*.pdb
+*.lib
+
+# IDE
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.suo
+*.user
+
+# Qt
+*.qm
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# Logs
+*.log
+imgui.ini
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Vulkan
+shaders/*.spv

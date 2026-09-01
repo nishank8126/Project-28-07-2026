@@ -4,29 +4,87 @@
 #include "workstation/renderer/VisibilityCache.h"
 
 #include <chrono>
+#include <cstdio>
 
 namespace workstation {
 namespace renderer {
 
+namespace {
+// Must stay byte-for-byte in sync with the PushConstants block in
+// shaders/point.vert.
+struct PointPushConstants {
+    float viewProjection[16];
+    float cameraPosition[4];
+    float lightDirection[4];
+    float pointScale;
+    float pointSize;
+    uint32_t visualizationMode;
+    float intensityMin;
+    float intensityMax;
+    float elevationMin;
+    float elevationMax;
+};
+} // namespace
+
 Renderer::~Renderer() { Shutdown(); }
 
 bool Renderer::Initialize(const RendererConfig& config) {
-    config_ = config;
+    return InitializeInternal(config, nullptr);
+}
 
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) return false;
+bool Renderer::InitializeEmbedded(const RendererConfig& config, void* nativeWindowHandle) {
+    RendererConfig embeddedConfig = config;
+    embeddedConfig.enableImGui = false;
+    return InitializeInternal(embeddedConfig, nativeWindowHandle);
+}
+
+bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWindowHandle) {
+    config_ = config;
+    embedded_ = nativeWindowHandle != nullptr;
 
     instance_ = std::make_unique<vulkan::VulkanInstance>();
     vulkan::VulkanInstanceConfig instanceConfig{};
     instanceConfig.enableValidation = config.enableValidation;
     instanceConfig.appName = config.appName;
-    instanceConfig.requiredExtensions = instance_->GetRequiredSDLExtensions();
-    if (!instance_->Initialize(instanceConfig)) return false;
 
-    if (!CreateWindow()) return false;
-    if (!CreateSurface()) return false;
+    if (embedded_) {
+        instanceConfig.requiredExtensions = {"VK_KHR_surface", "VK_KHR_win32_surface"};
+    } else {
+        if (!SDL_Init(SDL_INIT_VIDEO)) {
+            fprintf(stderr, "Renderer::Initialize: SDL_Init failed: %s\n", SDL_GetError());
+            return false;
+        }
+        for (const char* ext : instance_->GetRequiredSDLExtensions()) {
+            instanceConfig.requiredExtensions.push_back(ext);
+        }
+    }
+
+    if (!instance_->Initialize(instanceConfig)) {
+        fprintf(stderr, "Renderer::Initialize: VulkanInstance::Initialize failed\n");
+        return false;
+    }
+
+    if (embedded_) {
+        if (!CreateSurfaceFromNativeHandle(nativeWindowHandle)) {
+            fprintf(stderr, "Renderer::Initialize: CreateSurfaceFromNativeHandle failed\n");
+            return false;
+        }
+    } else {
+        if (!CreateSDLWindow()) {
+            fprintf(stderr, "Renderer::Initialize: CreateWindow failed: %s\n", SDL_GetError());
+            return false;
+        }
+        if (!CreateSurface()) {
+            fprintf(stderr, "Renderer::Initialize: CreateSurface failed: %s\n", SDL_GetError());
+            return false;
+        }
+    }
 
     device_ = std::make_unique<vulkan::VulkanDevice>();
-    if (!device_->Initialize(instance_->GetInstance(), surface_)) return false;
+    if (!device_->Initialize(instance_->GetInstance(), surface_)) {
+        fprintf(stderr, "Renderer::Initialize: VulkanDevice::Initialize failed\n");
+        return false;
+    }
 
     auto& physDev = device_->GetPhysicalDeviceInfo();
     auto support = physDev.GetSwapchainSupport(surface_);
@@ -35,11 +93,17 @@ bool Renderer::Initialize(const RendererConfig& config) {
     swapchain_ = std::make_unique<vulkan::VulkanSwapchain>();
     if (!swapchain_->Initialize(device_->GetDevice(), physDev.GetDevice(),
                                  surface_, config.initialWidth, config.initialHeight,
-                                 support, indices)) return false;
+                                 support, indices)) {
+        fprintf(stderr, "Renderer::Initialize: VulkanSwapchain::Initialize failed\n");
+        return false;
+    }
 
     frameManager_ = std::make_unique<vulkan::VulkanFrameManager>();
     if (!frameManager_->Initialize(device_->GetDevice(), config.maxFramesInFlight,
-                                    swapchain_->GetImageCount())) return false;
+                                    swapchain_->GetImageCount())) {
+        fprintf(stderr, "Renderer::Initialize: VulkanFrameManager::Initialize failed\n");
+        return false;
+    }
 
     VmaVulkanFunctions vmaFuncs{};
     vmaFuncs.vkGetInstanceProcAddr = vkGetInstanceProcAddr;
@@ -73,6 +137,9 @@ bool Renderer::Initialize(const RendererConfig& config) {
     bufferManager_->Initialize(vulkan::VulkanAllocator::Get(), config.maxFramesInFlight);
 
     adapter_.Initialize();
+    toolManager_.Initialize();
+    visualizationManager_.Initialize();
+    debugRenderer_.Initialize();
 
     CreateFramebuffers();
 
@@ -95,7 +162,10 @@ bool Renderer::Initialize(const RendererConfig& config) {
     vkAllocateCommandBuffers(device_->GetDevice(), &allocInfo, commandBuffers_.data());
 
     CreateDescriptorResources();
-    CreatePointPipeline();
+    if (!CreatePointPipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreatePointPipeline failed\n");
+        return false;
+    }
 
     context_.SetViewportSize(config.initialWidth, config.initialHeight);
     context_.GetVisibilitySystem().Initialize(&spatialTree_);
@@ -253,10 +323,21 @@ void Renderer::RenderFrame() {
         if (useImGui_ && imguiOverlay_) {
             imguiOverlay_->BeginFrame();
             imguiOverlay_->RenderDebugPanel(context_);
-            imguiOverlay_->RenderVisibilityPanel(visDebugStats_, context_.GetConfig());
-            imguiOverlay_->RenderLODPanel(context_);
+            imguiOverlay_->RenderGPUPanel(vulkan::VulkanAllocator::Get());
             imguiOverlay_->RenderStreamingPanel(context_);
-            imguiOverlay_->RenderVisualizationPanel(context_.GetConfig());
+            imguiOverlay_->RenderLODPanel(context_);
+            imguiOverlay_->RenderVisualizationManagerPanel(visualizationManager_, context_);
+            imguiOverlay_->RenderVisibilityPanel(visDebugStats_, context_.GetConfig());
+            imguiOverlay_->RenderToolsPanel(toolManager_, context_);
+            imguiOverlay_->RenderDebugOverlay(debugRenderer_, context_);
+
+            // VisualizationManager UI changes take effect starting next frame's
+            // push constants (matches this loop's existing single-frame latency).
+            auto& cfg = context_.GetConfig();
+            cfg.visualizationMode = visualizationManager_.GetMode();
+            cfg.intensityMin = visualizationManager_.GetIntensityMin();
+            cfg.intensityMax = visualizationManager_.GetIntensityMax();
+
             imguiOverlay_->Render(cmd);
         }
     }
@@ -318,7 +399,7 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
             lodCfg.visiblePointBudget = config_.gpuPointBudget;
             context_.GetLODManager().SetConfig(lodCfg);
 
-            ViewportPointBudget::PointBudgetConfig budgetCfg{};
+            PointBudgetConfig budgetCfg{};
             budgetCfg.gpuBudget = config_.gpuPointBudget;
             budgetCfg.enforceBudget = true;
             context_.GetPointBudget().SetConfig(budgetCfg);
@@ -477,16 +558,19 @@ void Renderer::UpdateGPUResidency() {
 }
 
 void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
-    if (!streamingManager_) {
-        DrawSelectedNodes(cmd);
-        return;
-    }
-
     for (uint64_t key : selectedNodeKeys_) {
-        if (!streamingManager_->IsNodeResident(key)) continue;
-
         auto* geo = adapter_.GetPreparedGeometry(key);
         if (!geo || geo->GetPointCount() == 0) continue;
+
+        // Geometry prepared by the adapter (via PreparePointCloud) is already
+        // uploaded to GPU buffers and is always drawable. The streaming
+        // manager's residency check applies only to nodes that depend on the
+        // streaming pipeline for upload — adapter-prepared nodes do not.
+        if (streamingManager_ &&
+            !streamingManager_->IsNodeResident(key) &&
+            adapter_.GetPreparedGeometry(key) == nullptr) {
+            continue;
+        }
 
         geo->BindPosition(cmd, 0);
         geo->BindColor(cmd, 1);
@@ -519,7 +603,7 @@ void Renderer::OnResize(uint32_t width, uint32_t height) {
     CreateFramebuffers();
 }
 
-bool Renderer::CreateWindow() {
+bool Renderer::CreateSDLWindow() {
     window_ = SDL_CreateWindow(
         config_.appName.c_str(),
         config_.initialWidth, config_.initialHeight,
@@ -528,7 +612,15 @@ bool Renderer::CreateWindow() {
 }
 
 bool Renderer::CreateSurface() {
-    return SDL_Vulkan_CreateSurface(window_, instance_->GetInstance(), &surface_);
+    return SDL_Vulkan_CreateSurface(window_, instance_->GetInstance(), nullptr, &surface_);
+}
+
+bool Renderer::CreateSurfaceFromNativeHandle(void* nativeWindowHandle) {
+    VkWin32SurfaceCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    createInfo.hwnd = static_cast<HWND>(nativeWindowHandle);
+    createInfo.hinstance = GetModuleHandle(nullptr);
+    return vkCreateWin32SurfaceKHR(instance_->GetInstance(), &createInfo, nullptr, &surface_) == VK_SUCCESS;
 }
 
 bool Renderer::CreateRenderPass() { return true; }
@@ -556,17 +648,28 @@ bool Renderer::CreateFramebuffers() {
 }
 
 bool Renderer::CreatePointPipeline() {
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+
     auto shaders = shaderManager_->LoadSPIRVFiles({
-        {"shaders/point.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
-        {"shaders/point.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
+        {shaderDir + "point.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
+        {shaderDir + "point.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
     });
+    for (auto& shader : shaders) {
+        if (shader.module == VK_NULL_HANDLE) {
+            fprintf(stderr, "Renderer::CreatePointPipeline: failed to load required shaders "
+                            "(run wk_renderer.exe from the build-gui directory so shaders/*.spv resolve)\n");
+            return false;
+        }
+    }
 
     VkDescriptorSetLayout layout = descriptorManager_->CreateLayout({});
 
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset = 0;
-    pushRange.size = 128;
+    pushRange.size = sizeof(PointPushConstants);
+
 
     pointPipelineLayout_ = pipelineManager_->CreatePipelineLayout({layout}, {pushRange});
     pointDescriptorLayout_ = layout;
@@ -594,42 +697,18 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     auto& cam = context_.GetCamera();
     auto& cfg = context_.GetConfig();
 
-    struct PushConstants {
-        float viewProjection[16];
-        float view[16];
-        float projection[16];
-        float cameraPosition[4];
-        float cameraDirection[4];
-        float lightDirection[4];
-        float pointScale;
-        float pointSize;
-        uint32_t visualizationMode;
-        float intensityMin;
-        float intensityMax;
-        float elevationMin;
-        float elevationMax;
-        uint32_t padding0;
-        uint32_t padding1;
-    } pc = {};
+    PointPushConstants pc = {};
 
     const auto& vp = cam.GetViewProjectionMatrix();
-    const auto& v = cam.GetViewMatrix();
-    const auto& p = cam.GetProjectionMatrix();
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c) {
             pc.viewProjection[r * 4 + c] = static_cast<float>(vp(r, c));
-            pc.view[r * 4 + c] = static_cast<float>(v(r, c));
-            pc.projection[r * 4 + c] = static_cast<float>(p(r, c));
         }
 
     auto pos = cam.GetPosition();
-    auto fwd = cam.GetForward();
     pc.cameraPosition[0] = static_cast<float>(pos.x);
     pc.cameraPosition[1] = static_cast<float>(pos.y);
     pc.cameraPosition[2] = static_cast<float>(pos.z);
-    pc.cameraDirection[0] = static_cast<float>(fwd.x);
-    pc.cameraDirection[1] = static_cast<float>(fwd.y);
-    pc.cameraDirection[2] = static_cast<float>(fwd.z);
     pc.lightDirection[0] = 0.3f;
     pc.lightDirection[1] = -0.7f;
     pc.lightDirection[2] = 0.5f;
@@ -639,8 +718,8 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.visualizationMode = static_cast<uint32_t>(cfg.visualizationMode);
     pc.intensityMin = cfg.intensityMin;
     pc.intensityMax = cfg.intensityMax;
-    pc.elevationMin = -50.0f;
-    pc.elevationMax = 50.0f;
+    pc.elevationMin = visualizationManager_.GetElevationMin();
+    pc.elevationMax = visualizationManager_.GetElevationMax();
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

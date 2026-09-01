@@ -1,0 +1,71 @@
+#version 450
+#extension GL_EXT_buffer_reference2 : require
+
+layout(local_size_x = 256) in;
+
+struct PointVertex {
+    vec4 position;
+    vec4 color;
+    float intensity;
+    float classification;
+    vec3 normal;
+};
+
+layout(push_constant) uniform CullPushConstants {
+    mat4 viewProjection;
+    vec4 frustumPlanes[6];
+    uint totalPoints;
+    uint outputOffset;
+    float pointSize;
+    uint padding0;
+};
+
+layout(binding = 0, set = 0) buffer readonly InputPoints {
+    PointVertex inputPoints[];
+};
+
+layout(binding = 1, set = 0) buffer writeonly OutputPoints {
+    PointVertex outputPoints[];
+};
+
+layout(binding = 2, set = 0) buffer DrawIndirectArgs {
+    uint drawCount;
+    uint instanceCount;
+    uint firstVertex;
+    uint firstInstance;
+};
+
+shared uint sharedCount;
+
+bool TestPointInFrustum(vec4 pos) {
+    for (int i = 0; i < 6; i++) {
+        if (dot(frustumPlanes[i], pos) < 0.0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void main() {
+    if (gl_LocalInvocationIndex == 0) {
+        sharedCount = 0;
+    }
+    barrier();
+
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= totalPoints) return;
+
+    vec4 pos = inputPoints[idx].position;
+    if (TestPointInFrustum(pos)) {
+        uint localIdx;
+        atomicAdd(sharedCount, 1);
+        memoryBarrierShared();
+        localIdx = sharedCount - 1;
+        outputPoints[outputOffset + localIdx] = inputPoints[idx];
+    }
+
+    barrier();
+    if (gl_LocalInvocationIndex == 0) {
+        atomicAdd(drawCount, sharedCount);
+    }
+}

@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -187,6 +188,10 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreateDebugPipeline failed\n");
         return false;
     }
+    if (!CreateLinePipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreateLinePipeline failed\n");
+        return false;
+    }
 
     context_.SetViewportSize(config.initialWidth, config.initialHeight);
     context_.GetVisibilitySystem().Initialize(&spatialTree_);
@@ -223,7 +228,11 @@ void Renderer::Shutdown() {
 
     if (pointPipeline_) pipelineManager_->DestroyPipeline(pointPipeline_);
     if (debugPipeline_) pipelineManager_->DestroyPipeline(debugPipeline_);
+    if (linePipeline_) pipelineManager_->DestroyPipeline(linePipeline_);
     if (pointPipelineLayout_) pipelineManager_->DestroyPipelineLayout(pointPipelineLayout_);
+    if (overlayVertexBuffer_.IsValid()) {
+        vulkan::VulkanAllocator::Get().DestroyBuffer(overlayVertexBuffer_);
+    }
     if (pointDescriptorLayout_) descriptorManager_->DestroyLayout(pointDescriptorLayout_);
     if (pointDescriptorPool_) descriptorManager_->DestroyPool(pointDescriptorPool_);
 
@@ -366,9 +375,12 @@ void Renderer::RenderFrame() {
                 fprintf(stderr, "[Renderer] WARNING: No visible or selected nodes!\n");
             }
         }
+    }
 
-        if (useImGui_ && imguiOverlay_) {
-            imguiOverlay_->BeginFrame();
+    DrawVectorOverlay(cmd);
+
+    if (useImGui_ && imguiOverlay_) {
+        imguiOverlay_->BeginFrame();
             imguiOverlay_->RenderDebugPanel(context_);
             imguiOverlay_->RenderGPUPanel(vulkan::VulkanAllocator::Get());
             imguiOverlay_->RenderStreamingPanel(context_);
@@ -386,7 +398,6 @@ void Renderer::RenderFrame() {
             cfg.intensityMax = visualizationManager_.GetIntensityMax();
 
             imguiOverlay_->Render(cmd);
-        }
     }
 }
 
@@ -460,6 +471,94 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
             }
         }
     }
+}
+
+void Renderer::RefreshNormals() {
+    if (!activeCloud_) return;
+    auto* root = activeCloud_->Root();
+    if (!root) return;
+
+    auto* ch = root->channels().GetChannel(pointcloud::ChannelId::Normals);
+    if (!ch || !ch->Data()) return;
+
+    auto* geo = adapter_.GetPreparedGeometry(0);
+    if (!geo) return;
+
+    geo->UploadNormal(reinterpret_cast<const float*>(ch->Data()),
+                       static_cast<uint32_t>(ch->Count()));
+}
+
+void Renderer::SetVectorOverlay(const pointcloud::SntEntities& entities) {
+    if (overlayVertexBuffer_.IsValid()) {
+        vulkan::VulkanAllocator::Get().DestroyBuffer(overlayVertexBuffer_);
+    }
+    overlayVertexCount_ = 0;
+    if (entities.polylines.empty()) return;
+
+    // Recenter around this geometry's own bbox midpoint (matching
+    // LasFileReader's recentering approach) so line vertices stay within
+    // float32 precision range. There's no shared origin with a separately
+    // -loaded point cloud's own per-file recentering -- exact co-
+    // registration with a specific LAZ tile isn't guaranteed.
+    double originX = (entities.bounds.minX + entities.bounds.maxX) * 0.5;
+    double originY = (entities.bounds.minY + entities.bounds.maxY) * 0.5;
+    double originZ = (entities.bounds.minZ + entities.bounds.maxZ) * 0.5;
+
+    std::vector<float> lineVerts;
+    for (const auto& poly : entities.polylines) {
+        size_t n = poly.VertexCount();
+        for (size_t i = 0; i + 1 < n; ++i) {
+            for (int e = 0; e < 2; ++e) {
+                size_t vi = i + e;
+                lineVerts.push_back(static_cast<float>(poly.points[vi * 3 + 0] - originX));
+                lineVerts.push_back(static_cast<float>(poly.points[vi * 3 + 1] - originY));
+                lineVerts.push_back(static_cast<float>(poly.points[vi * 3 + 2] - originZ));
+            }
+        }
+    }
+    if (lineVerts.empty()) return;
+
+    VkDeviceSize size = static_cast<VkDeviceSize>(lineVerts.size()) * sizeof(float);
+    overlayVertexBuffer_ = vulkan::VulkanAllocator::Get().CreateBuffer(
+        size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VMA_MEMORY_USAGE_AUTO,
+        VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+    if (!overlayVertexBuffer_.IsValid()) {
+        fprintf(stderr, "[Renderer] SetVectorOverlay: buffer allocation failed\n");
+        return;
+    }
+    if (overlayVertexBuffer_.mappedData) {
+        memcpy(overlayVertexBuffer_.mappedData, lineVerts.data(), static_cast<size_t>(size));
+        overlayVertexBuffer_.FlushMapped();
+    }
+    overlayVertexCount_ = static_cast<uint32_t>(lineVerts.size() / 3);
+
+    if (!activeCloud_) {
+        // Only take over camera framing when nothing else is already
+        // loaded/focused.
+        spatial::BoundingBox recentered;
+        recentered.minX = entities.bounds.minX - originX;
+        recentered.maxX = entities.bounds.maxX - originX;
+        recentered.minY = entities.bounds.minY - originY;
+        recentered.maxY = entities.bounds.maxY - originY;
+        recentered.minZ = entities.bounds.minZ - originZ;
+        recentered.maxZ = entities.bounds.maxZ - originZ;
+        context_.GetCamera().FocusOnBounds(recentered);
+    }
+
+    fprintf(stderr, "[Renderer] SetVectorOverlay: %zu polylines, %u line vertices uploaded\n",
+            entities.polylines.size(), overlayVertexCount_);
+}
+
+void Renderer::DrawVectorOverlay(VkCommandBuffer cmd) {
+    if (overlayVertexCount_ == 0 || !overlayVertexBuffer_.IsValid()) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline_);
+    UpdatePushConstants(cmd);
+
+    VkBuffer bufs[] = {overlayVertexBuffer_.buffer};
+    VkDeviceSize offs[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, bufs, offs);
+    vkCmdDraw(cmd, overlayVertexCount_, 1, 0, 0);
 }
 
 void Renderer::BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud) {
@@ -799,6 +898,67 @@ bool Renderer::CreateDebugPipeline() {
     return debugPipeline_ != VK_NULL_HANDLE;
 }
 
+bool Renderer::CreateLinePipeline() {
+    // Renders vector/CAD overlay geometry (e.g. decoded .snt shapes) as flat
+    // amber line segments on top of the point cloud.
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+
+    auto shaders = shaderManager_->LoadSPIRVFiles({
+        {shaderDir + "line.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
+        {shaderDir + "line.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
+    });
+    for (auto& shader : shaders) {
+        if (shader.module == VK_NULL_HANDLE) {
+            fprintf(stderr, "Renderer::CreateLinePipeline: failed to load shaders\n");
+            return false;
+        }
+    }
+
+    vulkan::PipelineConfig pconfig;
+    pconfig.SetDefaults();
+    pconfig.colorFormat = swapchain_->GetImageFormat();
+
+    // Single position-only vertex stream, replacing the 5-binding point
+    // layout SetDefaults() configured.
+    pconfig.vertexBindings = {
+        {0, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX},
+    };
+    pconfig.vertexAttributes = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+    };
+    pconfig.vertexInput.vertexBindingDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexBindings.size());
+    pconfig.vertexInput.pVertexBindingDescriptions = pconfig.vertexBindings.data();
+    pconfig.vertexInput.vertexAttributeDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexAttributes.size());
+    pconfig.vertexInput.pVertexAttributeDescriptions = pconfig.vertexAttributes.data();
+
+    pconfig.inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    pconfig.depthStencil.depthTestEnable = VK_FALSE;
+    pconfig.depthStencil.depthWriteEnable = VK_FALSE;
+    pconfig.rasterizer.cullMode = VK_CULL_MODE_NONE;
+    pconfig.rasterizer.lineWidth = 1.0f;
+
+    // Reuses pointPipelineLayout_ -- line.vert declares the identical
+    // push-constant block (only viewProjection is read).
+    linePipeline_ = pipelineManager_->CreateGraphicsPipeline(
+        pointPipelineLayout_, shaders, pconfig, renderPass_->GetRenderPass());
+
+    for (auto& shader : shaders) {
+        shaderManager_->DestroyShaderModule(shader.module);
+    }
+
+    fprintf(stderr, "[Renderer] Line pipeline created: %s\n",
+            linePipeline_ != VK_NULL_HANDLE ? "OK" : "FAILED");
+    fflush(stderr);
+    return linePipeline_ != VK_NULL_HANDLE;
+}
+
 bool Renderer::CreateDescriptorResources() {
     return true;
 }
@@ -821,9 +981,12 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.cameraPosition[0] = static_cast<float>(pos.x);
     pc.cameraPosition[1] = static_cast<float>(pos.y);
     pc.cameraPosition[2] = static_cast<float>(pos.z);
-    pc.lightDirection[0] = 0.3f;
-    pc.lightDirection[1] = -0.7f;
-    pc.lightDirection[2] = 0.5f;
+    // Predominantly overhead (Z is up in this Z-up/LiDAR data convention),
+    // with a slight lateral tilt so vertical surfaces (walls, edges) still
+    // pick up visible contrast in NormalShading mode.
+    pc.lightDirection[0] = 0.35f;
+    pc.lightDirection[1] = 0.35f;
+    pc.lightDirection[2] = 0.87f;
 
     pc.pointScale = static_cast<float>(context_.GetViewportHeight()) * 0.5f;
     pc.pointSize = cfg.pointSize;

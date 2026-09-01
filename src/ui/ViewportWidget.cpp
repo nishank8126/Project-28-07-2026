@@ -3,6 +3,11 @@
 #include "workstation/renderer/VisualizationManager.h"
 #include "workstation/pointcloud/PointCloud.h"
 #include "workstation/pointcloud/LasFileReader.h"
+#include "workstation/pointcloud/NormalEstimator.h"
+#include "workstation/pointcloud/SntFileReader.h"
+
+#include <chrono>
+#include <cstdio>
 
 #include <QExposeEvent>
 #include <QResizeEvent>
@@ -101,10 +106,55 @@ bool ViewportWindow::LoadPointCloudFile(const QString& path, QString* errorMessa
     return true;
 }
 
+bool ViewportWindow::LoadVectorOverlayFile(const QString& path, QString* errorMessage,
+                                            quint32* outEntityCount, quint32* outPolylineCount) {
+    pointcloud::SntEntities entities;
+    std::string err;
+    if (!pointcloud::LoadSntFile(path.toStdString(), entities, &err)) {
+        if (errorMessage) *errorMessage = QString::fromStdString(err);
+        return false;
+    }
+
+    if (outEntityCount) *outEntityCount = entities.headerEntityCount;
+    if (outPolylineCount) *outPolylineCount = static_cast<quint32>(entities.polylines.size());
+
+    if (m_rendererInitialized) {
+        m_renderer->SetVectorOverlay(entities);
+    }
+    return true;
+}
+
 void ViewportWindow::SetVisualizationMode(int mode) {
     if (!m_rendererInitialized) return;
-    m_renderer->GetContext().GetConfig().visualizationMode =
-        static_cast<renderer::VisualizationMode>(mode);
+
+    auto vmode = static_cast<renderer::VisualizationMode>(mode);
+    if (vmode == renderer::VisualizationMode::NormalShading && m_cloud && m_cloud->Root()) {
+        auto* root = m_cloud->Root();
+        if (!root->channels().GetChannel(pointcloud::ChannelId::Normals)) {
+            auto* xyz = root->channels().GetChannel(pointcloud::ChannelId::XYZ);
+            if (xyz && xyz->Data() && xyz->Count() > 0) {
+                emit statusChanged("Computing normals (one-time, may take a while)...");
+
+                auto t0 = std::chrono::steady_clock::now();
+                std::vector<float> normals;
+                pointcloud::EstimateNormalsFromPositions(
+                    reinterpret_cast<const float*>(xyz->Data()), xyz->Count(), normals);
+                double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+                fprintf(stderr, "[ViewportWindow] Computed normals for %zu points in %.1f ms\n",
+                        xyz->Count(), ms);
+
+                root->channels().AddChannel(pointcloud::CreateChannel(
+                    pointcloud::ChannelId::Normals, pointcloud::PointFormat::Float32,
+                    xyz->Count(), normals.data()));
+                m_renderer->RefreshNormals();
+
+                emit statusChanged("Normals ready");
+            }
+        }
+    }
+
+    m_renderer->GetContext().GetConfig().visualizationMode = vmode;
 }
 
 quint64 ViewportWindow::GetLoadedPointCount() const {

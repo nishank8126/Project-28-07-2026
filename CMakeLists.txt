@@ -118,6 +118,8 @@ add_library(workstation
     src/pointcloud/PointBlockParser.cpp
     src/pointcloud/CloudBlockLoader.cpp
     src/pointcloud/LasFileReader.cpp
+    src/pointcloud/NormalEstimator.cpp
+    src/pointcloud/SntFileReader.cpp
     src/core/PointCloudScene.cpp
     src/pod/PodBinaryReader.cpp
     src/pod/PodChannelDecoder.cpp
@@ -270,7 +272,7 @@ if(GLSLC)
     set(SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
     set(SHADER_DST_DIR ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${SHADER_DST_DIR})
-    foreach(SHADER point.vert point.frag)
+    foreach(SHADER point.vert point.frag line.vert line.frag)
         add_custom_command(
             OUTPUT ${SHADER_DST_DIR}/${SHADER}.spv
             COMMAND ${GLSLC} ${SHADER_SRC_DIR}/${SHADER} -o ${SHADER_DST_DIR}/${SHADER}.spv
@@ -278,8 +280,15 @@ if(GLSLC)
             COMMENT "Compiling ${SHADER} -> ${SHADER}.spv"
         )
     endforeach()
-    add_custom_target(shaders ALL DEPENDS ${SHADER_DST_DIR}/point.vert.spv ${SHADER_DST_DIR}/point.frag.spv)
+    add_custom_target(shaders ALL DEPENDS
+        ${SHADER_DST_DIR}/point.vert.spv ${SHADER_DST_DIR}/point.frag.spv
+        ${SHADER_DST_DIR}/line.vert.spv ${SHADER_DST_DIR}/line.frag.spv)
     add_dependencies(wk_renderer shaders)
+    # wk_gui reads its shaders from the same CMAKE_BINARY_DIR/shaders/ output
+    # (see Renderer::CreatePointPipeline's GetExeShaderDir()) -- without this,
+    # `ninja wk_gui` (as opposed to a full/default build) silently skips
+    # shader recompilation since ALL only applies to the default target.
+    add_dependencies(wk_gui shaders)
 else()
     message(WARNING "glslc not found - shaders will not be auto-compiled")
 endif()

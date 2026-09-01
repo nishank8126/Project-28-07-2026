@@ -96,7 +96,11 @@ void main() {
         case 5:
             vec3 n = normalize(inNormal);
             float lighting = abs(dot(n, normalize(lightDirection.xyz)));
-            visualColor = vec4(inColor * (0.3 + 0.7 * lighting), 1.0);
+            // Wider contrast range (was 0.3-1.0) so surfaces angled away from
+            // the light read as visibly shaded rather than a subtle tint --
+            // most LiDAR ground points face the same direction, so a mild
+            // range made the effect nearly invisible in a top-down view.
+            visualColor = vec4(inColor * (0.1 + 0.9 * lighting), 1.0);
             break;
         case 6:
             float density = 1.0 / (1.0 + dist * 0.001);

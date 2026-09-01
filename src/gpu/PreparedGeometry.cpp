@@ -35,8 +35,15 @@ GeometryAttribute PreparedGeometry::CreateAttribute(uint32_t elementSize,
     bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
+    // VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT (+ MAPPED_BIT)
+    // is required to make this allocation legal to map at all -- without it,
+    // vmaMapMemory() is a hard API violation (VMA asserts/crashes) even if
+    // the allocation happens to land in host-visible memory. requiredFlags
+    // alone (as this used to be) doesn't request that permission.
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                       VMA_ALLOCATION_CREATE_MAPPED_BIT;
     allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
     vmaCreateBuffer(allocator_->GetAllocator(), &bufferInfo, &allocInfo,
@@ -44,19 +51,7 @@ GeometryAttribute PreparedGeometry::CreateAttribute(uint32_t elementSize,
     attr.size = size;
     attr.elementSize = elementSize;
     attr.elementCount = elementCount;
-
-    if (attr.allocationInfo.pMappedData) {
-        attr.isMapped = true;
-    } else {
-        void* mapped = nullptr;
-        VkResult result = vmaMapMemory(allocator_->GetAllocator(), attr.allocation, &mapped);
-        if (result == VK_SUCCESS && mapped) {
-            attr.allocationInfo.pMappedData = mapped;
-            attr.isMapped = true;
-        } else {
-            attr.isMapped = false;
-        }
-    }
+    attr.isMapped = (attr.allocationInfo.pMappedData != nullptr);
 
     if (data && attr.isMapped) {
         memcpy(attr.allocationInfo.pMappedData, data, size);

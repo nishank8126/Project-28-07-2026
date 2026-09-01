@@ -17,6 +17,8 @@
 #include "workstation/vulkan/VulkanPipelineManager.h"
 #include "workstation/vulkan/VulkanShaderManager.h"
 #include "workstation/vulkan/VulkanRenderPass.h"
+#include "workstation/vulkan/VulkanAllocator.h"
+#include "workstation/pointcloud/SntFileReader.h"
 
 #include <memory>
 #include <vector>
@@ -71,6 +73,17 @@ public:
 
     void SetPointCloud(pointcloud::PointCloud* cloud);
 
+    // Re-uploads just the active cloud's Normals channel to the already
+    // -prepared GPU geometry, for when normals are computed lazily after
+    // the cloud is already loaded/rendering (see NormalEstimator.h). Does
+    // nothing if there's no active cloud or its root has no Normals channel.
+    void RefreshNormals();
+
+    // Uploads .snt (or similar) 2-D/3-D vector CAD geometry as a persistent
+    // line overlay drawn on top of the point cloud each frame. Pass an
+    // empty SntEntities to clear the overlay.
+    void SetVectorOverlay(const pointcloud::SntEntities& entities);
+
     RenderContext& GetContext() { return context_; }
     PointCloudRenderAdapter& GetAdapter() { return adapter_; }
     gpu::GPUBufferManager& GetBufferManager() { return *bufferManager_; }
@@ -115,12 +128,16 @@ private:
 
     VkPipeline pointPipeline_ = VK_NULL_HANDLE;
     VkPipeline debugPipeline_ = VK_NULL_HANDLE;
+    VkPipeline linePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pointPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout pointDescriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pointDescriptorPool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> pointDescriptorSets_;
 
     pointcloud::PointCloud* activeCloud_ = nullptr;
+
+    vulkan::GPUBuffer overlayVertexBuffer_;
+    uint32_t overlayVertexCount_ = 0;
 
     uint64_t lastFrameTime_ = 0;
     uint32_t frameNumber_ = 0;
@@ -137,7 +154,9 @@ private:
     bool CreateFramebuffers();
     bool CreatePointPipeline();
     bool CreateDebugPipeline();
+    bool CreateLinePipeline();
     bool CreateDescriptorResources();
+    void DrawVectorOverlay(VkCommandBuffer cmd);
 
     void UpdatePushConstants(VkCommandBuffer cmd);
     void BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud);

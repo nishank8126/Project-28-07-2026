@@ -31,6 +31,16 @@ public:
     // errorMessage) on failure.
     bool LoadPointCloudFile(const QString& path, QString* errorMessage = nullptr);
 
+    // Loads a .snt file (2-D CAD vector geometry, NOT a point cloud -- see
+    // SntFileReader.h) and displays it as a line overlay. Returns false
+    // (and fills errorMessage) on failure. outEntityCount/outPolylineCount,
+    // if given, report the header's claimed entity count vs. how many
+    // polyline/shape geometries this best-effort reader actually recovered
+    // (circles and text are not decoded).
+    bool LoadVectorOverlayFile(const QString& path, QString* errorMessage = nullptr,
+                                quint32* outEntityCount = nullptr,
+                                quint32* outPolylineCount = nullptr);
+
     bool IsRendererReady() const { return m_rendererInitialized; }
     double GetLastFPS() const;
     quint64 GetLoadedPointCount() const;

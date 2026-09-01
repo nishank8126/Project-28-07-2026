@@ -144,9 +144,32 @@ void MainWindow::onVisualizationModeSelected(int mode) {
 
 void MainWindow::onOpenFile() {
     QString path = QFileDialog::getOpenFileName(
-        this, "Open Point Cloud", QString(),
-        "Point Cloud Files (*.las *.laz);;LAS Files (*.las);;LAZ Files (*.laz);;All Files (*)");
+        this, "Open File", QString(),
+        "Point Cloud / Vector Files (*.las *.laz *.snt);;"
+        "Point Cloud Files (*.las *.laz);;"
+        "SNT Vector Files (*.snt);;All Files (*)");
     if (path.isEmpty()) return;
+
+    QString baseName = QFileInfo(path).fileName();
+
+    if (path.endsWith(".snt", Qt::CaseInsensitive)) {
+        QString error;
+        quint32 entityCount = 0, polylineCount = 0;
+        if (!m_viewport->LoadVectorOverlayFile(path, &error, &entityCount, &polylineCount)) {
+            QMessageBox::warning(this, "Open SNT File",
+                                  QString("Failed to load file:\n%1").arg(error));
+            m_toolSettings->appendLog(QString("Failed to load %1: %2").arg(path, error));
+            return;
+        }
+        m_toolSettings->appendLog(
+            QString("Loaded %1 -- header reports %2 entities, recovered %3 polyline/shape "
+                    "geometries (circles and text are not yet decoded by this best-effort "
+                    "reader; see plan notes).")
+                .arg(path).arg(entityCount).arg(polylineCount));
+        statusBar()->showMessage(QString("Loaded %1 (%2/%3 entities recovered)")
+                                      .arg(baseName).arg(polylineCount).arg(entityCount), 5000);
+        return;
+    }
 
     QString error;
     if (!m_viewport->LoadPointCloudFile(path, &error)) {
@@ -157,7 +180,6 @@ void MainWindow::onOpenFile() {
     }
 
     quint64 pointCount = m_viewport->GetLoadedPointCount();
-    QString baseName = QFileInfo(path).fileName();
     m_modelTree->setLoadedPointCloud(baseName, pointCount);
 
     double sizeX = 0, sizeY = 0, sizeZ = 0;

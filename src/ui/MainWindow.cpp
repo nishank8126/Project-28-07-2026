@@ -10,6 +10,9 @@
 #include <QDockWidget>
 #include <QMessageBox>
 #include <QLabel>
+#include <QFileDialog>
+#include <QFileInfo>
+#include <QTimer>
 
 namespace workstation {
 namespace ui {
@@ -22,13 +25,20 @@ MainWindow::MainWindow(QWidget* parent)
     buildMenu();
     buildToolBar();
     buildStatusBar();
+
+    auto* statusTimer = new QTimer(this);
+    connect(statusTimer, &QTimer::timeout, this, &MainWindow::updateStatusBar);
+    statusTimer->start(500);
 }
 
 MainWindow::~MainWindow() = default;
 
 void MainWindow::buildDockWidgets() {
-    m_viewport = new ViewportWidget(this);
-    setCentralWidget(m_viewport);
+    m_viewport = new ViewportWindow();
+    QWidget* viewportContainer = QWidget::createWindowContainer(m_viewport, this);
+    viewportContainer->setMinimumSize(320, 240);
+    viewportContainer->setFocusPolicy(Qt::StrongFocus);
+    setCentralWidget(viewportContainer);
 
     auto* leftDock = new QDockWidget("Model Tree", this);
     leftDock->setObjectName("ModelTreeDock");
@@ -49,14 +59,14 @@ void MainWindow::buildDockWidgets() {
     addDockWidget(Qt::BottomDockWidgetArea, bottomDock);
 
     m_modelTree->setDocument(&m_document);
-    m_toolSettings->appendLog("GUI Shell 1 started; renderer not connected.");
+    m_toolSettings->appendLog("WorkstationCAD started.");
 }
 
 void MainWindow::buildMenu() {
     QMenu* fileMenu = menuBar()->addMenu("&File");
 
     QAction* openAct = fileMenu->addAction("&Open...");
-    openAct->setEnabled(false);  // file I/O not implemented in GUI Shell 1
+    connect(openAct, &QAction::triggered, this, &MainWindow::onOpenFile);
 
     fileMenu->addSeparator();
     QAction* exitAct = fileMenu->addAction("E&xit");
@@ -95,11 +105,49 @@ void MainWindow::buildToolBar() {
 
 void MainWindow::buildStatusBar() {
     statusBar()->showMessage("Ready");
-    statusBar()->addPermanentWidget(new QLabel("Renderer: not connected"));
+    m_rendererStatusLabel = new QLabel("Renderer: initializing...");
+    statusBar()->addPermanentWidget(m_rendererStatusLabel);
 }
 
 void MainWindow::onExit() {
     close();
+}
+
+void MainWindow::onOpenFile() {
+    QString path = QFileDialog::getOpenFileName(
+        this, "Open Point Cloud", QString(),
+        "Point Cloud Files (*.las *.laz);;LAS Files (*.las);;LAZ Files (*.laz);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    QString error;
+    if (!m_viewport->LoadPointCloudFile(path, &error)) {
+        QMessageBox::warning(this, "Open Point Cloud",
+                              QString("Failed to load file:\n%1").arg(error));
+        m_toolSettings->appendLog(QString("Failed to load %1: %2").arg(path, error));
+        return;
+    }
+
+    quint64 pointCount = m_viewport->GetLoadedPointCount();
+    QString baseName = QFileInfo(path).fileName();
+    m_modelTree->setLoadedPointCloud(baseName, pointCount);
+
+    double sizeX = 0, sizeY = 0, sizeZ = 0;
+    m_viewport->GetLoadedExtent(sizeX, sizeY, sizeZ);
+    m_properties->showPointCloudProperties(baseName, pointCount, sizeX, sizeY, sizeZ);
+    m_toolSettings->appendLog(QString("Loaded %1 (%2 points)").arg(path).arg(pointCount));
+    statusBar()->showMessage(QString("Loaded %1").arg(baseName), 5000);
+}
+
+void MainWindow::updateStatusBar() {
+    if (!m_rendererStatusLabel) return;
+    if (!m_viewport->IsRendererReady()) {
+        m_rendererStatusLabel->setText("Renderer: initializing...");
+        return;
+    }
+    m_rendererStatusLabel->setText(
+        QString("Renderer: %1 FPS | %2 points")
+            .arg(m_viewport->GetLastFPS(), 0, 'f', 0)
+            .arg(m_viewport->GetLoadedPointCount()));
 }
 
 void MainWindow::onAbout() {

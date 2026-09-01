@@ -3,8 +3,20 @@
 #include "workstation/renderer/RenderContext.h"
 #include "workstation/renderer/RenderQueue.h"
 #include "workstation/renderer/ImGuiOverlay.h"
+#include "workstation/renderer/VisualizationManager.h"
+#include "workstation/renderer/DebugRenderer.h"
+#include "workstation/tools/ToolManager.h"
 #include "workstation/gpu/PointStreamingManager.h"
 #include "workstation/spatial/SpatialTree.h"
+
+#include "workstation/vulkan/VulkanInstance.h"
+#include "workstation/vulkan/VulkanDevice.h"
+#include "workstation/vulkan/VulkanSwapchain.h"
+#include "workstation/vulkan/VulkanFrameManager.h"
+#include "workstation/vulkan/VulkanDescriptorManager.h"
+#include "workstation/vulkan/VulkanPipelineManager.h"
+#include "workstation/vulkan/VulkanShaderManager.h"
+#include "workstation/vulkan/VulkanRenderPass.h"
 
 #include <memory>
 #include <vector>
@@ -42,6 +54,13 @@ public:
     Renderer& operator=(const Renderer&) = delete;
 
     bool Initialize(const RendererConfig& config);
+
+    // Initializes against an externally-owned native window (e.g. a Qt
+    // widget's HWND) instead of creating our own SDL window. ImGui is
+    // forced off in this mode since it depends on the SDL backend; the
+    // embedding host is expected to supply its own UI (e.g. Qt panels).
+    bool InitializeEmbedded(const RendererConfig& config, void* nativeWindowHandle);
+
     void Shutdown();
 
     void BeginFrame();
@@ -64,6 +83,7 @@ public:
 
 private:
     bool initialized_ = false;
+    bool embedded_ = false;
     RendererConfig config_;
     RenderContext context_;
 
@@ -82,6 +102,9 @@ private:
     std::unique_ptr<gpu::PointStreamingManager> streamingManager_;
 
     PointCloudRenderAdapter adapter_;
+    tools::ToolManager toolManager_;
+    VisualizationManager visualizationManager_;
+    DebugRenderer debugRenderer_;
 
     spatial::SpatialTree spatialTree_;
     std::vector<uint64_t> visibleNodeKeys_;
@@ -105,8 +128,10 @@ private:
 
     std::unique_ptr<ImGuiOverlay> imguiOverlay_;
 
-    bool CreateWindow();
+    bool InitializeInternal(const RendererConfig& config, void* nativeWindowHandle);
+    bool CreateSDLWindow();
     bool CreateSurface();
+    bool CreateSurfaceFromNativeHandle(void* nativeWindowHandle);
     bool CreateRenderPass();
     bool CreateFramebuffers();
     bool CreatePointPipeline();

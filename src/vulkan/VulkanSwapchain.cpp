@@ -15,6 +15,7 @@ bool VulkanSwapchain::Initialize(VkDevice device, VkPhysicalDevice physicalDevic
     physicalDevice_ = physicalDevice;
     surface_ = surface;
     indices_ = indices;
+    vkGetDeviceQueue(device_, static_cast<uint32_t>(indices_.presentFamily), 0, &presentQueue_);
 
     auto chooseFormat = [](const std::vector<VkSurfaceFormatKHR>& f) {
         for (auto& fmt : f) {

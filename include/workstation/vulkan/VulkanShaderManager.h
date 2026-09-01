@@ -1,14 +1,9 @@
 #pragma once
 #include "workstation/vulkan/VulkanHeaders.h"
+#include "workstation/vulkan/VulkanPipelineManager.h"
 
 namespace workstation {
 namespace vulkan {
-
-struct ShaderSource {
-    std::vector<uint32_t> spirv;
-    VkShaderStageFlagBits stage;
-    std::string entryPoint = "main";
-};
 
 class VulkanShaderManager {
 public:

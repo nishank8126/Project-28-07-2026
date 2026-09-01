@@ -62,6 +62,7 @@ private:
     VkBuffer currentVertexBuffer_[4] = {};
     VkBuffer lastVertexBuffer_[4] = {};
     VkDeviceSize currentVertexOffset_[4] = {};
+    VkDeviceSize lastVertexOffset_[4] = {};
     VkRenderPass currentRenderPass_ = VK_NULL_HANDLE;
     VkRenderPass lastRenderPass_ = VK_NULL_HANDLE;
     VkFramebuffer currentFramebuffer_ = VK_NULL_HANDLE;

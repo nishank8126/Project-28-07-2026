@@ -1,11 +1,12 @@
 #pragma once
-#include "workstation/renderer/LODManager.h"
 #include "workstation/renderer/VisibilityCache.h"
 
 #include <cstdint>
 
 namespace workstation {
 namespace renderer {
+
+struct LODNodeCandidate;
 
 struct PointBudgetConfig {
     uint64_t gpuBudget = 50'000'000;

@@ -8,10 +8,7 @@ layout(location = 4) in vec3 inNormal;
 
 layout(push_constant) uniform PushConstants {
     mat4 viewProjection;
-    mat4 view;
-    mat4 projection;
     vec4 cameraPosition;
-    vec4 cameraDirection;
     vec4 lightDirection;
     float pointScale;
     float pointSize;
@@ -20,8 +17,6 @@ layout(push_constant) uniform PushConstants {
     float intensityMax;
     float elevationMin;
     float elevationMax;
-    uint padding0;
-    uint padding1;
 };
 
 struct VertexOutput {

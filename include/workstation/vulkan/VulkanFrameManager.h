@@ -15,6 +15,8 @@ struct VulkanFrameSync {
 
 class VulkanFrameManager {
 public:
+    ~VulkanFrameManager();
+
     bool Initialize(VkDevice device, uint32_t maxFramesInFlight = 2,
                     uint32_t swapchainImageCount = 0);
     void Shutdown();

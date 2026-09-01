@@ -31,7 +31,7 @@ bool VulkanDevice::Initialize(VkInstance instance, VkSurfaceKHR surface,
     }
 
     std::vector<const char*> deviceExtensions = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
-    for (auto& ext : config.requiredExtensions) deviceExtensions.push_back(ext.c_str());
+    for (auto& ext : config.requiredExtensions) deviceExtensions.push_back(ext);
 
     VkPhysicalDeviceFeatures2 deviceFeatures{};
     deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
@@ -52,6 +52,7 @@ bool VulkanDevice::Initialize(VkInstance instance, VkSurfaceKHR surface,
     if (vkCreateDevice(physicalDevice_.GetDevice(), &createInfo, nullptr, &device_) != VK_SUCCESS) {
         return false;
     }
+    volkLoadDevice(device_);
 
     vkGetDeviceQueue(device_, indices.graphicsFamily, 0, &graphicsQueue_);
     vkGetDeviceQueue(device_, indices.presentFamily, 0, &presentQueue_);

@@ -2,10 +2,12 @@
 #include <QMainWindow>
 #include "workstation/core/Document.h"
 
+class QLabel;
+
 namespace workstation {
 namespace ui {
 
-class ViewportWidget;
+class ViewportWindow;
 class ModelTreeWidget;
 class PropertiesWidget;
 class ToolSettingsWidget;
@@ -26,6 +28,8 @@ public:
 private slots:
     void onExit();
     void onAbout();
+    void onOpenFile();
+    void updateStatusBar();
     void toggleModelTree(bool visible);
     void toggleProperties(bool visible);
     void toggleToolSettings(bool visible);
@@ -37,10 +41,12 @@ private:
     void buildDockWidgets();
 
     Document m_document;  // existing core, empty in GUI Shell 1 (no file I/O)
-    ViewportWidget*  m_viewport    = nullptr;
+    ViewportWindow*  m_viewport    = nullptr;
     ModelTreeWidget* m_modelTree   = nullptr;
     PropertiesWidget* m_properties  = nullptr;
     ToolSettingsWidget* m_toolSettings = nullptr;
+
+    QLabel* m_rendererStatusLabel = nullptr;
 };
 
 } // namespace ui

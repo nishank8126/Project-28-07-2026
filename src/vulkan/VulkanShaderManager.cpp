@@ -1,4 +1,5 @@
 #include "workstation/vulkan/VulkanShaderManager.h"
+#include <cstdio>
 #include <fstream>
 
 namespace workstation {
@@ -16,13 +17,21 @@ void VulkanShaderManager::Shutdown() {
 }
 
 VkShaderModule VulkanShaderManager::CreateShaderModule(const uint32_t* code, size_t size) {
+    if (!code || size == 0) {
+        fprintf(stderr, "VulkanShaderManager: refusing to create a shader module from empty SPIR-V\n");
+        return VK_NULL_HANDLE;
+    }
+
     VkShaderModuleCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
     createInfo.codeSize = size;
     createInfo.pCode = code;
 
-    VkShaderModule module;
-    vkCreateShaderModule(device_, &createInfo, nullptr, &module);
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device_, &createInfo, nullptr, &module) != VK_SUCCESS) {
+        fprintf(stderr, "VulkanShaderManager: vkCreateShaderModule failed\n");
+        return VK_NULL_HANDLE;
+    }
     return module;
 }
 
@@ -36,7 +45,10 @@ void VulkanShaderManager::DestroyShaderModule(VkShaderModule module) {
 
 std::vector<uint32_t> VulkanShaderManager::ReadSPIRVFile(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::ate | std::ios::binary);
-    if (!file.is_open()) return {};
+    if (!file.is_open()) {
+        fprintf(stderr, "VulkanShaderManager: could not open SPIR-V file '%s'\n", filepath.c_str());
+        return {};
+    }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
     std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
@@ -49,7 +61,6 @@ ShaderModule VulkanShaderManager::LoadSPIRV(const std::string& filepath,
                                               VkShaderStageFlagBits stage) {
     auto spirv = ReadSPIRVFile(filepath);
     ShaderModule shader{};
-    shader.spirv = spirv;
     shader.stage = stage;
     shader.module = CreateShaderModule(spirv);
     return shader;

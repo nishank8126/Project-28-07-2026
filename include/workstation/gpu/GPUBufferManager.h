@@ -31,12 +31,16 @@ struct GPUBufferAllocation {
     BufferType type = BufferType::PointPosition;
     uint64_t lastUsedFrame = 0;
     bool isPersistent = true;
+
+    bool IsValid() const { return buffer != VK_NULL_HANDLE; }
 };
 
 class GPUBufferManager {
 public:
     bool Initialize(vulkan::VulkanAllocator& allocator, uint32_t maxFramesInFlight = 2);
     void Shutdown();
+
+    VmaAllocator GetAllocator() const { return allocator_->GetAllocator(); }
 
     GPUBufferAllocation* Allocate(BufferType type, VkDeviceSize size,
                                    bool hostVisible = false);

@@ -11,19 +11,21 @@ namespace renderer {
 
 namespace {
 // Must stay byte-for-byte in sync with the PushConstants block in
-// shaders/point.vert.
+// shaders/point.vert and shaders/point.frag.
 struct PointPushConstants {
-    float viewProjection[16];
-    float cameraPosition[4];
-    float lightDirection[4];
-    float pointScale;
-    float pointSize;
-    uint32_t visualizationMode;
-    float intensityMin;
-    float intensityMax;
-    float elevationMin;
-    float elevationMax;
-};
+    float viewProjection[16];   // 64 bytes
+    float cameraPosition[4];    // 16 bytes
+    float lightDirection[4];    // 16 bytes
+    float pointScale;           //  4 bytes
+    float pointSize;            //  4 bytes
+    uint32_t visualizationMode; //  4 bytes
+    float intensityMin;         //  4 bytes
+    float intensityMax;         //  4 bytes
+    float elevationMin;         //  4 bytes
+    float elevationMax;         //  4 bytes
+};                              // Total: 124 bytes
+static_assert(sizeof(PointPushConstants) == 124,
+    "PointPushConstants must be exactly 124 bytes to match GLSL shaders");
 } // namespace
 
 Renderer::~Renderer() { Shutdown(); }
@@ -303,21 +305,48 @@ void Renderer::RenderFrame() {
     visDebugStats_ = {};
 
     if (activeCloud_) {
-        PerformVisibilityCulling();
-        PerformLODSelection();
-        ProcessStreamingRequests();
-        UpdateGPUResidency();
+        auto& cfg = context_.GetConfig();
 
-        if (!selectedNodeKeys_.empty()) {
+        if (cfg.forceDrawAll) {
+            // Debug mode: bypass visibility/LOD, draw all prepared geometry directly
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
             UpdatePushConstants(cmd);
 
-            DrawResidentNodes(cmd);
-        } else if (!visibleNodeKeys_.empty()) {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
-            UpdatePushConstants(cmd);
+            for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
+                if (!geo || geo->GetPointCount() == 0) continue;
+                geo->BindPosition(cmd, 0);
+                geo->BindColor(cmd, 1);
+                geo->BindIntensity(cmd, 2);
+                geo->BindClassification(cmd, 3);
+                geo->BindNormal(cmd, 4);
+                fprintf(stderr, "[Renderer] FORCE DRAW: key=%llu pointCount=%u\n",
+                        key, geo->GetPointCount());
+                geo->Draw(cmd);
+                context_.GetStats().drawCalls++;
+            }
+        } else {
+            PerformVisibilityCulling();
+            PerformLODSelection();
+            ProcessStreamingRequests();
+            UpdateGPUResidency();
 
-            DrawVisibleNodes(cmd);
+            fprintf(stderr, "[Renderer] Frame %u: visible=%zu selected=%zu visPoints=%llu drawCalls=%u\n",
+                    frameNumber_, visibleNodeKeys_.size(), selectedNodeKeys_.size(),
+                    context_.GetStats().visiblePoints, context_.GetStats().drawCalls);
+
+            if (!selectedNodeKeys_.empty()) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                UpdatePushConstants(cmd);
+
+                DrawResidentNodes(cmd);
+            } else if (!visibleNodeKeys_.empty()) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                UpdatePushConstants(cmd);
+
+                DrawVisibleNodes(cmd);
+            } else {
+                fprintf(stderr, "[Renderer] WARNING: No visible or selected nodes!\n");
+            }
         }
 
         if (useImGui_ && imguiOverlay_) {
@@ -388,10 +417,24 @@ void Renderer::EndFrame() {
 void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
     activeCloud_ = cloud;
     if (cloud) {
-        adapter_.PreparePointCloud(*cloud);
+        auto* prepGeo = adapter_.PreparePointCloud(*cloud);
         auto* root = cloud->Root();
         if (root) {
+            fprintf(stderr, "[Renderer] SetPointCloud: %llu points, cloud='%s'\n",
+                    cloud->PointCount(), cloud->Name());
+            fprintf(stderr, "[Renderer] Cloud bounds: min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)\n",
+                    root->bounds().minX, root->bounds().minY, root->bounds().minZ,
+                    root->bounds().maxX, root->bounds().maxY, root->bounds().maxZ);
+            fprintf(stderr, "[Renderer] PreparedGeometry: pointCount=%u, gpuMem=%llu bytes\n",
+                    prepGeo ? prepGeo->GetPointCount() : 0,
+                    prepGeo ? prepGeo->GetGPUMemoryBytes() : 0);
+
             context_.GetCamera().FocusOnBounds(root->bounds());
+            auto& cam = context_.GetCamera();
+            fprintf(stderr, "[Renderer] Camera: pos=(%.3f, %.3f, %.3f) target=(%.3f, %.3f, %.3f)\n",
+                    cam.GetPosition().x, cam.GetPosition().y, cam.GetPosition().z,
+                    cam.GetTarget().x, cam.GetTarget().y, cam.GetTarget().z);
+
             BuildSpatialTreeFromCloud(*cloud);
 
             LODConfig lodCfg{};
@@ -412,7 +455,7 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
 }
 
 void Renderer::BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud) {
-    spatialTree_ = spatial::SpatialTree();
+    spatialTree_.Clear();
 
     auto* root = cloud.Root();
     if (!root) return;
@@ -578,6 +621,8 @@ void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
         geo->BindClassification(cmd, 3);
         geo->BindNormal(cmd, 4);
 
+        fprintf(stderr, "[Renderer] vkCmdDraw: key=%llu pointCount=%u gpuMem=%llu\n",
+                key, geo->GetPointCount(), geo->GetGPUMemoryBytes());
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
@@ -699,10 +744,12 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
 
     PointPushConstants pc = {};
 
+    // Matrix4d stores row-major (m_[row][col]). GLSL mat4 is column-major.
+    // Copy column-by-column so the shader reads the correct orientation.
     const auto& vp = cam.GetViewProjectionMatrix();
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c) {
-            pc.viewProjection[r * 4 + c] = static_cast<float>(vp(r, c));
+    for (int c = 0; c < 4; ++c)
+        for (int r = 0; r < 4; ++r) {
+            pc.viewProjection[c * 4 + r] = static_cast<float>(vp(r, c));
         }
 
     auto pos = cam.GetPosition();

@@ -33,6 +33,10 @@ public:
         const auto* c = GetChannel(ChannelId::RGB);
         return c ? c->ReadRGB(index, out) : false;
     }
+    bool ReadRGBFloat(size_t index, float out[3]) const {
+        const auto* c = GetChannel(ChannelId::RGB);
+        return c ? c->ReadRGBFloat(index, out) : false;
+    }
 
     // Aggregate stats across all channels.
     size_t PointCount() const {

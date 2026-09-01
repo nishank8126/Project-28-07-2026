@@ -24,5 +24,14 @@ void ModelTreeWidget::setDocument(const Document* document) {
     m_tree->addTopLevelItem(new QTreeWidgetItem(QStringList{"No document loaded"}));
 }
 
+void ModelTreeWidget::setLoadedPointCloud(const QString& name, quint64 pointCount) {
+    m_tree->clear();
+    auto* item = new QTreeWidgetItem(QStringList{name});
+    item->addChild(new QTreeWidgetItem(QStringList{
+        QString("%1 points").arg(pointCount)}));
+    m_tree->addTopLevelItem(item);
+    m_tree->expandAll();
+}
+
 } // namespace ui
 } // namespace workstation

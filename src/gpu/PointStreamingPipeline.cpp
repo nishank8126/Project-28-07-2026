@@ -1,4 +1,8 @@
 #include "workstation/gpu/PointStreamingPipeline.h"
+#include "workstation/pointcloud/PointAttributeMask.h"
+#include "workstation/pointcloud/PointChannelManager.h"
+
+#include <cstring>
 
 namespace workstation {
 namespace gpu {
@@ -101,8 +105,8 @@ std::vector<PointVertex> PointStreamingPipeline::DecodeNodePoints(uint64_t nodeK
         }
 
         auto attrs = channels.Attributes();
-        if (attrs.Has(PointAttribute::Intensity)) {
-            auto* ch = channels.GetChannel(ChannelId::Intensity);
+        if (attrs.Has(pointcloud::PointAttribute::Intensity)) {
+            auto* ch = channels.GetChannel(pointcloud::ChannelId::Intensity);
             if (ch && ch->Data() && i < ch->Count()) {
                 v.intensity = reinterpret_cast<const float*>(ch->Data())[i];
             }
@@ -110,15 +114,15 @@ std::vector<PointVertex> PointStreamingPipeline::DecodeNodePoints(uint64_t nodeK
             v.intensity = 0.5f;
         }
 
-        if (attrs.Has(PointAttribute::Classification)) {
-            auto* ch = channels.GetChannel(ChannelId::Classification);
+        if (attrs.Has(pointcloud::PointAttribute::Classification)) {
+            auto* ch = channels.GetChannel(pointcloud::ChannelId::Classification);
             if (ch && ch->Data() && i < ch->Count()) {
                 v.classification = static_cast<float>(ch->Data()[i]);
             }
         }
 
-        if (attrs.Has(PointAttribute::Normals)) {
-            auto* ch = channels.GetChannel(ChannelId::Normals);
+        if (attrs.Has(pointcloud::PointAttribute::Normals)) {
+            auto* ch = channels.GetChannel(pointcloud::ChannelId::Normals);
             if (ch && ch->Data() && i < ch->Count()) {
                 const float* n = reinterpret_cast<const float*>(ch->Data()) + i * 3;
                 v.normal[0] = n[0]; v.normal[1] = n[1]; v.normal[2] = n[2];

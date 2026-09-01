@@ -41,6 +41,8 @@ public:
     gpu::PreparedGeometry* PrepareNode(uint64_t nodeKey,
                                          const pointcloud::PointCloudNode* node);
     gpu::PreparedGeometry* GetPreparedGeometry(uint64_t nodeKey);
+    const std::unordered_map<uint64_t, std::unique_ptr<gpu::PreparedGeometry>>&
+        GetAllPreparedGeometries() const { return preparedGeometries_; }
 
     RenderCommand CreateRenderCommand(
         uint64_t nodeKey,

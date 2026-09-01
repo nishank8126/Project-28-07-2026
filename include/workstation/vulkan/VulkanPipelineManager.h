@@ -20,6 +20,8 @@ struct PipelineConfig {
     VkPipelineColorBlendStateCreateInfo colorBlending = {};
     VkPipelineDynamicStateCreateInfo dynamicState = {};
     std::vector<VkDynamicState> dynamicStates;
+    std::vector<VkVertexInputBindingDescription> vertexBindings;
+    std::vector<VkVertexInputAttributeDescription> vertexAttributes;
 
     VkFormat colorFormat = VK_FORMAT_UNDEFINED;
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;

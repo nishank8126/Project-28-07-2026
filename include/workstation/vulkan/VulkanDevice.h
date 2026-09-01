@@ -25,7 +25,7 @@ public:
     VkQueue GetPresentQueue() const { return presentQueue_; }
     VkQueue GetComputeQueue() const { return computeQueue_; }
     VkQueue GetTransferQueue() const { return transferQueue_; }
-    const QueueFamilyIndices& GetQueueFamilies() const { return physicalDevice_.GetQueueFamilies(); }
+    QueueFamilyIndices GetQueueFamilies() const { return physicalDevice_.GetQueueFamilies(); }
     const VulkanPhysicalDevice& GetPhysicalDeviceInfo() const { return physicalDevice_; }
 
     void WaitIdle() const { vkDeviceWaitIdle(device_); }

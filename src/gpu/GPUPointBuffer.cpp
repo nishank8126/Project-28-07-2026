@@ -1,5 +1,8 @@
 #include "workstation/gpu/GPUPointBuffer.h"
 
+#include <algorithm>
+#include <vector>
+
 namespace workstation {
 namespace gpu {
 
@@ -58,6 +61,46 @@ bool GPUPointBuffer::UploadFromGeometry(const PreparedGeometry& geometry) {
     uploadAttr(normalBuffer_, geometry.Normal());
 
     pointCount_ = geometry.GetPointCount();
+    return true;
+}
+
+bool GPUPointBuffer::UploadPoints(const PointVertex* vertices, uint64_t count) {
+    if (!bufferManager_ || !vertices || count == 0) return false;
+    count = std::min(count, maxPoints_);
+
+    std::vector<float> positions(count * 3);
+    std::vector<float> colors(count * 3);
+    std::vector<float> intensities(count);
+    std::vector<float> classifications(count);
+    std::vector<float> normals(count * 3);
+
+    for (uint64_t i = 0; i < count; ++i) {
+        const PointVertex& v = vertices[i];
+        positions[i * 3 + 0] = v.position[0];
+        positions[i * 3 + 1] = v.position[1];
+        positions[i * 3 + 2] = v.position[2];
+        colors[i * 3 + 0] = v.color[0];
+        colors[i * 3 + 1] = v.color[1];
+        colors[i * 3 + 2] = v.color[2];
+        intensities[i] = v.intensity;
+        classifications[i] = v.classification;
+        normals[i * 3 + 0] = v.normal[0];
+        normals[i * 3 + 1] = v.normal[1];
+        normals[i * 3 + 2] = v.normal[2];
+    }
+
+    if (positionBuffer_)
+        bufferManager_->UploadToGPU(positionBuffer_, positions.data(), positions.size() * sizeof(float));
+    if (colorBuffer_)
+        bufferManager_->UploadToGPU(colorBuffer_, colors.data(), colors.size() * sizeof(float));
+    if (intensityBuffer_)
+        bufferManager_->UploadToGPU(intensityBuffer_, intensities.data(), intensities.size() * sizeof(float));
+    if (classificationBuffer_)
+        bufferManager_->UploadToGPU(classificationBuffer_, classifications.data(), classifications.size() * sizeof(float));
+    if (normalBuffer_)
+        bufferManager_->UploadToGPU(normalBuffer_, normals.data(), normals.size() * sizeof(float));
+
+    pointCount_ = count;
     return true;
 }
 

@@ -4,6 +4,8 @@
 namespace workstation {
 namespace vulkan {
 
+class VulkanAllocator;
+
 struct GPUBuffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VmaAllocation allocation = VK_NULL_HANDLE;
@@ -13,12 +15,8 @@ struct GPUBuffer {
     void* mappedData = nullptr;
 
     bool IsValid() const { return buffer != VK_NULL_HANDLE; }
-    void InvalidateMapped() {
-        if (mappedData) vmaInvalidateAllocation(VulkanAllocator::Get(), allocation, 0, size);
-    }
-    void FlushMapped() {
-        if (mappedData) vmaFlushAllocation(VulkanAllocator::Get(), allocation, 0, size);
-    }
+    void InvalidateMapped();
+    void FlushMapped();
 };
 
 struct GPUImage {
@@ -70,6 +68,13 @@ private:
     VkQueue graphicsQueue_ = VK_NULL_HANDLE;
     Stats stats_ = {};
 };
+
+inline void GPUBuffer::InvalidateMapped() {
+    if (mappedData) vmaInvalidateAllocation(VulkanAllocator::Get().GetAllocator(), allocation, 0, size);
+}
+inline void GPUBuffer::FlushMapped() {
+    if (mappedData) vmaFlushAllocation(VulkanAllocator::Get().GetAllocator(), allocation, 0, size);
+}
 
 } // namespace vulkan
 } // namespace workstation

@@ -4,8 +4,30 @@ namespace workstation {
 namespace vulkan {
 
 void PipelineConfig::SetDefaults() {
+    // Point geometry is uploaded as 5 separate, tightly-packed buffers (one
+    // per attribute; see GPUPointBuffer::Bind()), each bound at its own
+    // binding slot 0-4, matching point.vert's input locations 0-4.
+    vertexBindings = {
+        {0, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX}, // position
+        {1, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX}, // color
+        {2, sizeof(float),     VK_VERTEX_INPUT_RATE_VERTEX}, // intensity
+        {3, sizeof(float),     VK_VERTEX_INPUT_RATE_VERTEX}, // classification
+        {4, sizeof(float) * 3, VK_VERTEX_INPUT_RATE_VERTEX}, // normal
+    };
+    vertexAttributes = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {1, 1, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {2, 2, VK_FORMAT_R32_SFLOAT,       0},
+        {3, 3, VK_FORMAT_R32_SFLOAT,       0},
+        {4, 4, VK_FORMAT_R32G32B32_SFLOAT, 0},
+    };
+
     vertexInput = {};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertexInput.vertexBindingDescriptionCount = static_cast<uint32_t>(vertexBindings.size());
+    vertexInput.pVertexBindingDescriptions = vertexBindings.data();
+    vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(vertexAttributes.size());
+    vertexInput.pVertexAttributeDescriptions = vertexAttributes.data();
 
     inputAssembly = {};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;

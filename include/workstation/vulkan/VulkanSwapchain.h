@@ -30,6 +30,7 @@ private:
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
+    VkQueue presentQueue_ = VK_NULL_HANDLE;
 
     VkFormat imageFormat_ = VK_FORMAT_UNDEFINED;
     VkExtent2D extent_ = {0, 0};

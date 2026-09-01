@@ -67,6 +67,15 @@ bool PointAttributeChannel::ReadRGB(size_t index, uint8_t out[3]) const {
     return true;
 }
 
+bool PointAttributeChannel::ReadRGBFloat(size_t index, float out[3]) const {
+    if (id_ != ChannelId::RGB || index >= count_ || data_.empty()) return false;
+    if (format_ != PointFormat::Float32) return false;
+    const uint8_t* base = data_.data() + index * stride_;
+    // RGB stored as 3 consecutive float32 values (12 bytes).
+    std::memcpy(out, base, 3 * sizeof(float));
+    return true;
+}
+
 PointAttributeChannel CreateChannel(ChannelId id, PointFormat format, size_t count,
                                     const void* data,
                                     const double scale[3], const double offset[3],

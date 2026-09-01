@@ -7,10 +7,7 @@ layout(location = 0) out vec4 outColor;
 
 layout(push_constant) uniform PushConstants {
     mat4 viewProjection;
-    mat4 view;
-    mat4 projection;
     vec4 cameraPosition;
-    vec4 cameraDirection;
     vec4 lightDirection;
     float pointScale;
     float pointSize;
@@ -19,18 +16,21 @@ layout(push_constant) uniform PushConstants {
     float intensityMax;
     float elevationMin;
     float elevationMax;
-    uint padding0;
-    uint padding1;
 };
 
 void main() {
     vec2 center = gl_PointCoord - vec2(0.5);
     float dist = length(center);
-    if (dist > 0.5) {
+
+    // Adaptive discard: only discard for points large enough to form a circle.
+    // For points <= 2 pixels, skip the circle test to avoid killing all fragments.
+    float pointRadius = length(vec2(dFdx(gl_PointCoord.x), dFdy(gl_PointCoord.y))) * 0.5;
+    float adaptiveThreshold = max(0.5, pointRadius * 2.0);
+    if (dist > adaptiveThreshold) {
         discard;
     }
 
-    float edgeFade = smoothstep(0.5, 0.35, dist);
+    float edgeFade = smoothstep(adaptiveThreshold, adaptiveThreshold * 0.7, dist);
     float depthFade = clamp(1.0 - inDepth * 0.0001, 0.3, 1.0);
 
     outColor = vec4(inColor.rgb, edgeFade * depthFade);

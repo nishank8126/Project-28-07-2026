@@ -1,5 +1,18 @@
 #include "workstation/renderer/ImGuiOverlay.h"
 #include "workstation/renderer/Renderer.h"
+#include "workstation/renderer/DebugRenderer.h"
+#include "workstation/renderer/VisualizationManager.h"
+#include "workstation/tools/ToolManager.h"
+#include "workstation/tools/SelectionTool.h"
+#include "workstation/tools/MeasurementTool.h"
+#include "workstation/tools/ClipTool.h"
+#include "workstation/tools/SectionTool.h"
+#include "workstation/tools/CrossSectionTool.h"
+#include "workstation/tools/ClassificationTool.h"
+
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
 
 namespace workstation {
 namespace renderer {
@@ -11,15 +24,6 @@ bool ImGuiOverlay::Initialize(SDL_Window* window, VkInstance instance,
                                VkRenderPass renderPass, uint32_t imageCount) {
     window_ = window;
     device_ = device.GetDevice();
-
-    VkDescriptorPoolSize poolSize = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    vkCreateDescriptorPool(device_, &poolInfo, nullptr, &imguiPool_);
 
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
@@ -34,10 +38,14 @@ bool ImGuiOverlay::Initialize(SDL_Window* window, VkInstance instance,
     initInfo.Device = device_;
     initInfo.QueueFamily = device.GetQueueFamilies().graphicsFamily;
     initInfo.Queue = device.GetGraphicsQueue();
-    initInfo.DescriptorPool = imguiPool_;
+    // Let the backend manage its own descriptor pool sized to its actual
+    // requirements (it needs both VK_DESCRIPTOR_TYPE_SAMPLER and
+    // VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, which a hand-rolled pool
+    // easily under-provisions).
+    initInfo.DescriptorPoolSize = 64;
     initInfo.MinImageCount = imageCount;
     initInfo.ImageCount = imageCount;
-    initInfo.RenderPass = renderPass;
+    initInfo.PipelineInfoMain.RenderPass = renderPass;
     ImGui_ImplVulkan_Init(&initInfo);
 
     initialized_ = true;
@@ -49,10 +57,6 @@ void ImGuiOverlay::Shutdown() {
     ImGui_ImplVulkan_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    if (imguiPool_) {
-        vkDestroyDescriptorPool(device_, imguiPool_, nullptr);
-        imguiPool_ = VK_NULL_HANDLE;
-    }
     initialized_ = false;
 }
 
@@ -95,7 +99,7 @@ void ImGuiOverlay::RenderDebugPanel(RenderContext& context) {
 
 void ImGuiOverlay::RenderLODPanel(RenderContext& context) {
     ImGui::SetNextWindowPos(ImVec2(320, 10), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(300, 280), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 270), ImGuiCond_FirstUseEver);
     ImGui::Begin("LOD");
 
     auto& lodStats = context.GetLODDebugStats();
@@ -188,31 +192,8 @@ void ImGuiOverlay::RenderStreamingPanel(RenderContext& context) {
     ImGui::End();
 }
 
-void ImGuiOverlay::RenderVisualizationPanel(RenderConfig& config) {
-    ImGui::SetNextWindowPos(ImVec2(320, 170), ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize(ImVec2(250, 200), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Visualization");
-
-    const char* modes[] = {"RGB", "Intensity", "Classification",
-                           "Elevation", "Height Ramp", "Normal Shading", "Density"};
-    int currentMode = static_cast<int>(config.visualizationMode);
-    if (ImGui::Combo("Mode", &currentMode, modes, 7)) {
-        config.visualizationMode = static_cast<VisualizationMode>(currentMode);
-    }
-
-    ImGui::Checkbox("Bounding Boxes", &config.showBoundingBoxes);
-    ImGui::Checkbox("LOD Colors", &config.showLODColors);
-    ImGui::Checkbox("Frustum", &config.showFrustum);
-    ImGui::Checkbox("Frustum Culling", &config.frustumCulling);
-
-    ImGui::SliderFloat("Intensity Min", &config.intensityMin, 0.0f, 1.0f);
-    ImGui::SliderFloat("Intensity Max", &config.intensityMax, 0.0f, 1.0f);
-
-    ImGui::End();
-}
-
 void ImGuiOverlay::RenderVisibilityPanel(const VisibilityDebugStats& stats, RenderConfig& config) {
-    ImGui::SetNextWindowPos(ImVec2(640, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImVec2(630, 10), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 220), ImGuiCond_FirstUseEver);
     ImGui::Begin("Visibility");
 
@@ -246,6 +227,67 @@ void ImGuiOverlay::SetupStyle() {
     colors[ImGuiCol_FrameBg] = ImVec4(0.2f, 0.2f, 0.22f, 0.54f);
     colors[ImGuiCol_TitleBg] = ImVec4(0.15f, 0.15f, 0.17f, 1.0f);
     colors[ImGuiCol_TitleBgActive] = ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+}
+
+void ImGuiOverlay::RenderToolsPanel(tools::ToolManager& toolManager, RenderContext& context) {
+    ImGui::SetNextWindowPos(ImVec2(630, 240), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 350), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Tools");
+
+    toolManager.RenderUI(context);
+
+    ImGui::End();
+}
+
+void ImGuiOverlay::RenderDebugOverlay(DebugRenderer& debugRenderer, RenderContext& context) {
+    ImGui::SetNextWindowPos(ImVec2(940, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 300), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Debug Overlay");
+
+    auto& lines = debugRenderer.GetLines();
+    auto& boxes = debugRenderer.GetBoxes();
+    auto& texts = debugRenderer.GetTexts();
+
+    ImGui::Text("Lines: %zu", lines.size());
+    ImGui::Text("Boxes: %zu", boxes.size());
+    ImGui::Text("Texts: %zu", texts.size());
+    ImGui::Separator();
+
+    for (size_t i = 0; i < boxes.size() && i < 10; ++i) {
+        const auto& box = boxes[i];
+        ImGui::Text("Box %zu: [%.1f,%.1f,%.1f]-[%.1f,%.1f,%.1f]",
+                    i,
+                    box.bounds.minX, box.bounds.minY, box.bounds.minZ,
+                    box.bounds.maxX, box.bounds.maxY, box.bounds.maxZ);
+    }
+    if (boxes.size() > 10) {
+        ImGui::Text("... and %zu more boxes", boxes.size() - 10);
+    }
+
+    ImGui::Separator();
+    for (size_t i = 0; i < texts.size() && i < 5; ++i) {
+        const auto& txt = texts[i];
+        ImGui::Text("Text %zu: %s", i, txt.text.c_str());
+    }
+    if (texts.size() > 5) {
+        ImGui::Text("... and %zu more texts", texts.size() - 5);
+    }
+
+    if (ImGui::Button("Clear Debug")) {
+        debugRenderer.Clear();
+    }
+
+    ImGui::End();
+}
+
+void ImGuiOverlay::RenderVisualizationManagerPanel(VisualizationManager& vizManager, RenderContext& context) {
+    ImGui::SetNextWindowPos(ImVec2(320, 290), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 260), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Visualization Manager");
+
+    vizManager.RenderUI(context);
+
+    ImGui::End();
 }
 
 } // namespace renderer

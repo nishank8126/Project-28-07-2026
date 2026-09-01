@@ -29,6 +29,7 @@ public:
 
     void SetPerspective(double fovYDegrees, double aspectRatio,
                         double nearClip, double farClip);
+    void SetAspectRatio(double aspectRatio) { aspectRatio_ = aspectRatio; dirty_ = true; }
     void SetOrthographic(double left, double right, double bottom, double top,
                          double nearClip, double farClip);
     void SetLookAt(const math::Point3d& eye, const math::Point3d& center,

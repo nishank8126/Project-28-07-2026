@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(WorkstationCAD CXX)
+project(WorkstationCAD CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -9,23 +9,96 @@ if(MSVC)
 endif()
 
 # ---- External Dependencies ----
+# The LunarG Vulkan SDK (VULKAN_SDK) also bundles SDL3/VMA config + headers
+# under the same tree, so widen the search path to find them all.
+if(DEFINED ENV{VULKAN_SDK})
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{VULKAN_SDK}")
+endif()
+
 find_package(Vulkan REQUIRED)
 find_package(SDL3 REQUIRED)
 
 find_path(VMA_INCLUDE_DIR vk_mem_alloc.h
-    HINTS $ENV{VULKAN_SDK}/Include $ENV{VMA_INCLUDE_DIR})
+    HINTS $ENV{VULKAN_SDK}/Include $ENV{VMA_INCLUDE_DIR}
+    PATH_SUFFIXES vma)
 if(NOT VMA_INCLUDE_DIR)
     message(FATAL_ERROR "VMA not found. Set VMA_INCLUDE_DIR.")
 endif()
 
-find_path(IMGUI_INCLUDE_DIR imgui.h
-    HINTS $ENV{IMGUI_INCLUDE_DIR})
-if(NOT IMGUI_INCLUDE_DIR)
-    message(FATAL_ERROR "ImGui not found. Set IMGUI_INCLUDE_DIR.")
+# ---- volk (Vulkan loader) ----
+# The codebase compiles with VK_NO_PROTOTYPES (see VulkanHeaders.h), so every
+# vk* entry point is resolved dynamically at runtime through volk instead of
+# being link-time-bound against vulkan-1.lib. volk ships as source in the SDK.
+find_path(VOLK_INCLUDE_DIR volk.h
+    HINTS $ENV{VULKAN_SDK}/Include $ENV{VULKAN_SDK}/Include/Volk)
+if(NOT VOLK_INCLUDE_DIR)
+    message(FATAL_ERROR "volk not found (expected under the Vulkan SDK's Include/Volk).")
 endif()
 
-find_path(IMGUI_IMPL_DIR imgui_impl_vulkan.h
-    HINTS ${IMGUI_INCLUDE_DIR}/backends $ENV{IMGUI_IMPL_DIR})
+add_library(volk STATIC ${VOLK_INCLUDE_DIR}/volk.c)
+target_include_directories(volk PUBLIC ${VOLK_INCLUDE_DIR})
+target_link_libraries(volk PUBLIC Vulkan::Headers)
+target_compile_definitions(volk PUBLIC VK_NO_PROTOTYPES)
+if(WIN32)
+    target_compile_definitions(volk PUBLIC VK_USE_PLATFORM_WIN32_KHR)
+endif()
+
+# ---- Dear ImGui (vendored: no prebuilt package ships in the Vulkan SDK) ----
+include(FetchContent)
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.92.9b
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+    ${imgui_SOURCE_DIR}/imgui.cpp
+    ${imgui_SOURCE_DIR}/imgui_demo.cpp
+    ${imgui_SOURCE_DIR}/imgui_draw.cpp
+    ${imgui_SOURCE_DIR}/imgui_tables.cpp
+    ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
+    ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui PUBLIC
+    ${imgui_SOURCE_DIR}
+    ${imgui_SOURCE_DIR}/backends
+)
+# Route imgui's Vulkan backend through volk instead of linking vulkan-1.lib
+# directly, matching the rest of the codebase (VK_NO_PROTOTYPES).
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_VULKAN_USE_VOLK)
+target_link_libraries(imgui PUBLIC volk SDL3::SDL3)
+
+# ---- LASzip (LAS/LAZ point cloud file reading) ----
+set(LASZIP_BUILD_STATIC ON CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    laszip
+    GIT_REPOSITORY https://github.com/LASzip/LASzip.git
+    GIT_TAG        3.5.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(laszip)
+# LASzip's CMake predates target-based usage requirements (no
+# target_include_directories on its libraries), so wire the include paths
+# manually onto the C API target we actually link against.
+# NOTE: laszip_api3 (dll/laszip_api.c) is a runtime dynamic-loading shim that
+# calls LoadLibrary("LASzip.dll") internally and stays a no-op stub without
+# it; it is unusable when statically linked. The real static implementation
+# of the same C API lives directly in laszip3 (src/laszip_dll.cpp), so link
+# against that instead.
+target_include_directories(laszip3 PUBLIC
+    ${laszip_SOURCE_DIR}/include
+    ${laszip_SOURCE_DIR}/include/laszip
+    ${laszip_SOURCE_DIR}/dll
+    ${laszip_BINARY_DIR}/include
+)
+# Upstream laszip_dll.cpp uses std::numeric_limits<uint32_t> without
+# including <cstdint>; force-include it rather than patch vendored source.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(laszip3 PRIVATE -include cstdint)
+endif()
 
 # ---- Core library ----
 add_library(workstation
@@ -44,6 +117,7 @@ add_library(workstation
     src/pointcloud/PointCloudStreamReader.cpp
     src/pointcloud/PointBlockParser.cpp
     src/pointcloud/CloudBlockLoader.cpp
+    src/pointcloud/LasFileReader.cpp
     src/core/PointCloudScene.cpp
     src/pod/PodBinaryReader.cpp
     src/pod/PodChannelDecoder.cpp
@@ -64,6 +138,7 @@ add_library(workstation
     src/math/MathConstants.cpp
     src/math/Matrix3d.cpp
     # Vulkan backend
+    src/vulkan/VmaImplementation.cpp
     src/vulkan/VulkanInstance.cpp
     src/vulkan/VulkanPhysicalDevice.cpp
     src/vulkan/VulkanDevice.cpp
@@ -89,6 +164,8 @@ add_library(workstation
     src/renderer/Renderer.cpp
     src/renderer/PointCloudRenderAdapter.cpp
     src/renderer/ImGuiOverlay.cpp
+    src/renderer/VisualizationManager.cpp
+    src/renderer/DebugRenderer.cpp
     # GPU layer
     src/gpu/GPUBufferManager.cpp
     src/gpu/PreparedGeometry.cpp
@@ -96,17 +173,23 @@ add_library(workstation
     src/gpu/GeometryCache.cpp
     src/gpu/PointStreamingPipeline.cpp
     src/gpu/PointStreamingManager.cpp
+    # Tools layer
+    src/tools/ToolManager.cpp
+    src/tools/SelectionTool.cpp
+    src/tools/MeasurementTool.cpp
+    src/tools/ClipTool.cpp
+    src/tools/SectionTool.cpp
+    src/tools/CrossSectionTool.cpp
+    src/tools/ClassificationTool.cpp
 )
 
 target_include_directories(workstation PUBLIC include)
-target_include_directories(workstation PRIVATE
+target_include_directories(workstation PUBLIC
     ${Vulkan_INCLUDE_DIRS}
     ${SDL3_INCLUDE_DIRS}
     ${VMA_INCLUDE_DIR}
-    ${IMGUI_INCLUDE_DIR}
-    ${IMGUI_IMPL_DIR}
 )
-target_link_libraries(workstation PUBLIC ${Vulkan_LIBRARIES} SDL3::SDL3)
+target_link_libraries(workstation PUBLIC volk SDL3::SDL3 imgui laszip3)
 
 # ---- Tests ----
 add_executable(wk_tests tests/piece1_tests.cpp)

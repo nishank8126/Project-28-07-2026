@@ -2,6 +2,7 @@
 #include "workstation/renderer/Camera.h"
 #include "workstation/renderer/VisibilityCache.h"
 #include "workstation/renderer/RenderCommand.h"
+#include "workstation/renderer/ViewportPointBudget.h"
 #include "workstation/spatial/SpatialTree.h"
 #include "workstation/gpu/GeometryCache.h"
 
@@ -85,6 +86,7 @@ private:
 class LODManager {
 public:
     void SetConfig(const LODConfig& config) { config_ = config; }
+    LODConfig& GetConfig() { return config_; }
     const LODConfig& GetConfig() const { return config_; }
 
     void EvaluateNodes(const Camera& camera, uint32_t viewportWidth,

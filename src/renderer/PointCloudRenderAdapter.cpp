@@ -103,7 +103,7 @@ void PointCloudRenderAdapter::ExtractPointCloudData(
     std::vector<float> normals(count * 3);
 
     double xyz[3] = {};
-    uint8_t rgb[3] = {};
+    float rgbFloat[3] = {};
 
     for (size_t i = 0; i < count; ++i) {
         if (channels.ReadXYZ(i, xyz)) {
@@ -111,10 +111,19 @@ void PointCloudRenderAdapter::ExtractPointCloudData(
             positions[i * 3 + 1] = static_cast<float>(xyz[1]);
             positions[i * 3 + 2] = static_cast<float>(xyz[2]);
         }
-        if (channels.ReadRGB(i, rgb)) {
-            colors[i * 3 + 0] = rgb[0] / 255.0f;
-            colors[i * 3 + 1] = rgb[1] / 255.0f;
-            colors[i * 3 + 2] = rgb[2] / 255.0f;
+        // Try float RGB first (LasFileReader stores as float32),
+        // then fall back to uint8 RGB.
+        if (channels.ReadRGBFloat(i, rgbFloat)) {
+            colors[i * 3 + 0] = rgbFloat[0];
+            colors[i * 3 + 1] = rgbFloat[1];
+            colors[i * 3 + 2] = rgbFloat[2];
+        } else {
+            uint8_t rgb8[3] = {};
+            if (channels.ReadRGB(i, rgb8)) {
+                colors[i * 3 + 0] = rgb8[0] / 255.0f;
+                colors[i * 3 + 1] = rgb8[1] / 255.0f;
+                colors[i * 3 + 2] = rgb8[2] / 255.0f;
+            }
         }
         auto attrs = channels.Attributes();
         if (attrs.Has(pointcloud::PointAttribute::Intensity)) {

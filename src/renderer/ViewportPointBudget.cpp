@@ -1,4 +1,5 @@
 #include "workstation/renderer/ViewportPointBudget.h"
+#include "workstation/renderer/LODManager.h"
 
 namespace workstation {
 namespace renderer {

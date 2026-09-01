@@ -1,7 +1,8 @@
 #pragma once
 
-#define VK_NO_PROTOTYPES
-#include <vulkan/vulkan.h>
+// VK_USE_PLATFORM_WIN32_KHR is defined project-wide via the volk CMake
+// target (see CMakeLists.txt) so every TU that links volk agrees on it.
+#include <volk.h>
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 1

@@ -1,5 +1,13 @@
 @echo off
-set GLSLC=glslc
+where glslc >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    set GLSLC=glslc
+) else if exist "%VULKAN_SDK%\Bin\glslc.exe" (
+    set GLSLC="%VULKAN_SDK%\Bin\glslc.exe"
+) else (
+    echo glslc not found on PATH and VULKAN_SDK is not set. Install/select the Vulkan SDK.
+    exit /b 1
+)
 set SHADER_DIR=%~dp0
 set OUTPUT_DIR=%~dp0../build-gui/shaders
 

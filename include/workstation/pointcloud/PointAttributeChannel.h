@@ -33,8 +33,11 @@ public:
 
     // Decode one XYZ element (applies scale/offset). Valid for the XYZ channel.
     bool ReadXYZ(size_t index, double out[3]) const;
-    // Decode one RGB element. Valid for the RGB channel.
+    // Decode one RGB element as uint8 (0-255). Valid for the RGB channel.
     bool ReadRGB(size_t index, uint8_t out[3]) const;
+    // Decode one RGB element as float (0.0-1.0). Valid for the RGB channel
+    // stored in Float32 format (as produced by LasFileReader).
+    bool ReadRGBFloat(size_t index, float out[3]) const;
 
 private:
     ChannelId id_ = ChannelId::XYZ;

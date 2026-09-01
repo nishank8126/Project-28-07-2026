@@ -9,6 +9,7 @@
 #include "workstation/renderer/PipelineCacheManager.h"
 #include "workstation/renderer/VulkanStateCache.h"
 #include "workstation/renderer/ConstantBufferManager.h"
+#include "workstation/renderer/VisualizationManager.h"
 #include "workstation/gpu/PointStreamingManager.h"
 #include "workstation/pointcloud/PointCloud.h"
 #include "workstation/pointcloud/PointCloudNode.h"
@@ -19,16 +20,6 @@
 
 namespace workstation {
 namespace renderer {
-
-enum class VisualizationMode : uint32_t {
-    RGB = 0,
-    Intensity = 1,
-    Classification = 2,
-    Elevation = 3,
-    HeightRamp = 4,
-    NormalShading = 5,
-    Density = 6
-};
 
 struct RenderConfig {
     VisualizationMode visualizationMode = VisualizationMode::RGB;
@@ -44,6 +35,7 @@ struct RenderConfig {
     bool sortByPipeline = true;
     bool useIndirectDrawing = false;
     bool useComputeCulling = false;
+    bool forceDrawAll = false;
     uint32_t maxPointsPerFrame = 50'000'000;
     bool lodEnabled = true;
     float pointBudgetMillions = 25.0f;

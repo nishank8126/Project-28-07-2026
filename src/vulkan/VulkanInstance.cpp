@@ -6,6 +6,10 @@ namespace vulkan {
 VulkanInstance::~VulkanInstance() { Shutdown(); }
 
 bool VulkanInstance::Initialize(const VulkanInstanceConfig& config) {
+    if (volkInitialize() != VK_SUCCESS) {
+        return false;
+    }
+
     validationEnabled_ = config.enableValidation;
 
     VkApplicationInfo appInfo{};
@@ -37,6 +41,7 @@ bool VulkanInstance::Initialize(const VulkanInstanceConfig& config) {
     if (vkCreateInstance(&createInfo, nullptr, &instance_) != VK_SUCCESS) {
         return false;
     }
+    volkLoadInstance(instance_);
 
     if (validationEnabled_) {
         auto createDebugFunc = (PFN_vkCreateDebugUtilsMessengerEXT)
@@ -73,10 +78,8 @@ void VulkanInstance::Shutdown() {
 
 std::vector<const char*> VulkanInstance::GetRequiredSDLExtensions() const {
     uint32_t count = 0;
-    SDL_Vulkan_GetInstanceExtensions(&count, nullptr);
-    std::vector<const char*> extensions(count);
-    SDL_Vulkan_GetInstanceExtensions(&count, extensions.data());
-    return extensions;
+    char const* const* names = SDL_Vulkan_GetInstanceExtensions(&count);
+    return std::vector<const char*>(names, names + count);
 }
 
 VKAPI_ATTR VkBool32 VKAPI_CALL VulkanInstance::DebugCallback(

@@ -6,6 +6,29 @@ namespace workstation { namespace spatial {
 
 SpatialTree::~SpatialTree() { Delete(root_); }
 
+SpatialTree::SpatialTree(SpatialTree&& other) noexcept
+    : root_(other.root_), size_(other.size_) {
+    other.root_ = nullptr;
+    other.size_ = 0;
+}
+
+SpatialTree& SpatialTree::operator=(SpatialTree&& other) noexcept {
+    if (this != &other) {
+        Delete(root_);
+        root_ = other.root_;
+        size_ = other.size_;
+        other.root_ = nullptr;
+        other.size_ = 0;
+    }
+    return *this;
+}
+
+void SpatialTree::Clear() {
+    Delete(root_);
+    root_ = nullptr;
+    size_ = 0;
+}
+
 void SpatialTree::Insert(SpatialNode*& node, uint64_t key, uint64_t pc, const BoundingBox& b) {
     if (!node) {
         node = new SpatialNode();

@@ -14,6 +14,12 @@ class PropertiesWidget : public QWidget {
     Q_OBJECT
 public:
     explicit PropertiesWidget(QWidget* parent = nullptr);
+
+    void showPointCloudProperties(const QString& name, quint64 pointCount,
+                                   double sizeX, double sizeY, double sizeZ);
+
+private:
+    QLabel* m_content = nullptr;
 };
 
 } // namespace ui

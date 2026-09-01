@@ -18,7 +18,15 @@ class SpatialTree {
     size_t size_ = 0;
 
 public:
+    SpatialTree() = default;
     ~SpatialTree();
+
+    SpatialTree(SpatialTree&& other) noexcept;
+    SpatialTree& operator=(SpatialTree&& other) noexcept;
+    SpatialTree(const SpatialTree&) = delete;
+    SpatialTree& operator=(const SpatialTree&) = delete;
+
+    void Clear();
 
     void Insert(uint64_t key, uint64_t pointCount, const BoundingBox& b = BoundingBox{});
     SpatialNode* Find(uint64_t key) const;

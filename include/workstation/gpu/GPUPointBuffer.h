@@ -3,6 +3,7 @@
 #include "workstation/vulkan/VulkanAllocator.h"
 #include "workstation/gpu/GPUBufferManager.h"
 #include "workstation/gpu/PreparedGeometry.h"
+#include "workstation/gpu/PointVertex.h"
 
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,7 @@ public:
     void Shutdown();
 
     bool UploadFromGeometry(const PreparedGeometry& geometry);
+    bool UploadPoints(const PointVertex* vertices, uint64_t count);
     void Bind(VkCommandBuffer cmd) const;
     void Draw(VkCommandBuffer cmd, uint32_t count = 0, uint32_t offset = 0) const;
     void DrawIndirect(VkCommandBuffer cmd, VkBuffer indirectBuffer,

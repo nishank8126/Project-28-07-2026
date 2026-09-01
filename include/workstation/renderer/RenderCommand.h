@@ -50,7 +50,7 @@ struct RenderCommand {
     }
 
     bool NeedsUpdate() const {
-        return geometry && geometry->GetRevision() != geometryRevision;
+        return geometry && static_cast<uint64_t>(geometry->GetRevision()) != geometryRevision;
     }
 };
 

@@ -111,12 +111,14 @@ void Camera::FocusOnBounds(const spatial::BoundingBox& bounds, double padding) {
     double dy = (bounds.maxY - bounds.minY);
     double dz = (bounds.maxZ - bounds.minZ);
     double maxDim = std::max({dx, dy, dz});
+    if (maxDim <= 0.0) maxDim = 1.0;
 
     double dist = maxDim * padding / std::tan(fovY_ * 0.5 * M_PI / 180.0);
 
-    target_ = {cx, cy, cz};
-    position_ = {cx, cy, cz - dist};
-    dirty_ = true;
+    // SetLookAt() keeps yaw_/pitch_ (which ComputeViewMatrix() actually reads
+    // via GetForward()) consistent with position_/target_; setting those two
+    // directly here without it left the camera looking in a stale direction.
+    SetLookAt({cx, cy, cz - dist}, {cx, cy, cz}, worldUp_);
 }
 
 math::Point3d Camera::GetForward() const {

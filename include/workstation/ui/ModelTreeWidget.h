@@ -21,6 +21,9 @@ public:
     // the empty state. No elements are fabricated.
     void setDocument(const Document* document);
 
+    // Shows the currently loaded point cloud file as the tree's one entry.
+    void setLoadedPointCloud(const QString& name, quint64 pointCount);
+
 private:
     QTreeWidget* m_tree = nullptr;
 };

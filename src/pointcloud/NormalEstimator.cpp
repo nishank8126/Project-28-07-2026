@@ -104,11 +104,20 @@ void EstimateNormalsFromPositions(const float* positions, size_t count,
     }
 
     constexpr int kNeighbors = 12;
-    std::vector<std::pair<double, uint32_t>> candidates;
     size_t fallbackCount = 0;
     double minCosUp = 1.0, maxCosUp = -1.0;
 
-    for (size_t i = 0; i < count; ++i) {
+    // Parallelized like surface::NormalEstimator (which already uses OpenMP
+    // for this same kind of per-point neighbor-search + PCA work): each
+    // point's normal is independent of every other point's, so this scales
+    // near-linearly with core count. `candidates` is declared inside the
+    // loop body (not hoisted above it) specifically so each iteration - and
+    // therefore each thread - gets its own vector instead of racing on a
+    // shared one.
+    #pragma omp parallel for schedule(dynamic, 256) \
+        reduction(+:fallbackCount) reduction(min:minCosUp) reduction(max:maxCosUp)
+    for (int64_t i = 0; i < static_cast<int64_t>(count); ++i) {
+        std::vector<std::pair<double, uint32_t>> candidates;
         double px = positions[i * 3 + 0], py = positions[i * 3 + 1], pz = positions[i * 3 + 2];
         CellKey center = cellOf(px, py, pz);
 

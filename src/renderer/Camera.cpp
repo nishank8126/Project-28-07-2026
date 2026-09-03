@@ -115,10 +115,21 @@ void Camera::FocusOnBounds(const spatial::BoundingBox& bounds, double padding) {
 
     double dist = maxDim * padding / std::tan(fovY_ * 0.5 * M_PI / 180.0);
 
+    // Retreat along whichever of X/Z the scene is thinnest on, not always Z.
+    // Backing off along a fixed axis meant a scan whose tallest extent was Z
+    // (a facade, a pole, anything not flat terrain) put the camera end-on
+    // down its own longest dimension, showing only the thin cross-section -
+    // which looked like it needed heavy zooming in to see anything. Y is
+    // deliberately excluded: worldUp_ is fixed at {0,1,0}, and retreating
+    // along the up axis makes forward parallel to up, which zeroes out
+    // GetRight()'s cross product and breaks the view matrix.
+    math::Point3d eye = (dx <= dz) ? math::Point3d{cx - dist, cy, cz}
+                                    : math::Point3d{cx, cy, cz - dist};
+
     // SetLookAt() keeps yaw_/pitch_ (which ComputeViewMatrix() actually reads
     // via GetForward()) consistent with position_/target_; setting those two
     // directly here without it left the camera looking in a stale direction.
-    SetLookAt({cx, cy, cz - dist}, {cx, cy, cz}, worldUp_);
+    SetLookAt(eye, {cx, cy, cz}, worldUp_);
 }
 
 math::Point3d Camera::GetForward() const {
@@ -150,27 +161,27 @@ math::Point3d Camera::GetUp() const {
     };
 }
 
-const math::Matrix4d& Camera::GetViewMatrix() {
+const math::Matrix4d& Camera::GetViewMatrix() const {
     if (dirty_) UpdateMatrices();
     return viewMatrix_;
 }
 
-const math::Matrix4d& Camera::GetProjectionMatrix() {
+const math::Matrix4d& Camera::GetProjectionMatrix() const {
     if (dirty_) UpdateMatrices();
     return projectionMatrix_;
 }
 
-const math::Matrix4d& Camera::GetViewProjectionMatrix() {
+const math::Matrix4d& Camera::GetViewProjectionMatrix() const {
     if (dirty_) UpdateMatrices();
     return viewProjectionMatrix_;
 }
 
-const FrustumPlanes& Camera::GetFrustumPlanes() {
+const FrustumPlanes& Camera::GetFrustumPlanes() const {
     if (dirty_) UpdateMatrices();
     return frustumPlanes_;
 }
 
-void Camera::UpdateMatrices() {
+void Camera::UpdateMatrices() const {
     if (!dirty_) return;
     viewMatrix_ = ComputeViewMatrix();
     projectionMatrix_ = ComputeProjectionMatrix();
@@ -179,7 +190,7 @@ void Camera::UpdateMatrices() {
     dirty_ = false;
 }
 
-math::Matrix4d Camera::ComputeViewMatrix() {
+math::Matrix4d Camera::ComputeViewMatrix() const {
     math::Point3d fwd = GetForward();
     math::Point3d right = GetRight();
     math::Point3d up = GetUp();
@@ -192,7 +203,7 @@ math::Matrix4d Camera::ComputeViewMatrix() {
     );
 }
 
-math::Matrix4d Camera::ComputeProjectionMatrix() {
+math::Matrix4d Camera::ComputeProjectionMatrix() const {
     if (projectionType_ == CameraProjection::Orthographic) {
         double rl = orthoRight_ - orthoLeft_;
         double tb = orthoTop_ - orthoBottom_;

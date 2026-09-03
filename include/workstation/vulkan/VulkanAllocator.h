@@ -54,6 +54,7 @@ public:
     void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
 
     VmaAllocator GetAllocator() const { return allocator_; }
+    VkDevice GetDevice() const { return device_; }
 
     struct Stats {
         uint64_t totalAllocated = 0;

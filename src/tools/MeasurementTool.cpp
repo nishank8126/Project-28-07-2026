@@ -67,6 +67,38 @@ void MeasurementTool::ComputeResult() {
             }
             break;
         }
+        case MeasurementMode::Volume: {
+            // Compute volume using the prism method: for a closed polygon
+            // footprint (xy), sum the signed volumes of vertical prisms.
+            // Requires at least 3 points to form the base polygon.
+            result_.volume = 0.0;
+            if (points_.size() >= 3) {
+                // Average elevation of all points as the reference base
+                double baseZ = 0.0;
+                for (const auto& pt : points_) baseZ += pt.position.z;
+                baseZ /= static_cast<double>(points_.size());
+
+                // Signed area and volume using the divergence theorem
+                double signedArea = 0.0;
+                double signedVolume = 0.0;
+                size_t n = points_.size();
+                for (size_t i = 0; i < n; ++i) {
+                    size_t j = (i + 1) % n;
+                    const auto& pi = points_[i].position;
+                    const auto& pj = points_[j].position;
+                    double cross = pi.x * pj.y - pj.x * pi.y;
+                    signedArea += cross;
+                    signedVolume += cross * (pi.z + pj.z) / 2.0;
+                }
+                signedArea *= 0.5;
+                if (std::abs(signedArea) > 1e-12) {
+                    // Volume relative to base elevation
+                    result_.volume = std::abs(signedVolume) - std::abs(signedArea) * baseZ;
+                    result_.volume = std::abs(result_.volume);
+                }
+            }
+            break;
+        }
         case MeasurementMode::None:
             break;
     }
@@ -94,9 +126,9 @@ void MeasurementTool::RenderUI() {
     ImGui::Text("Measurement Tool");
     ImGui::Separator();
 
-    const char* modes[] = {"Distance", "Area", "Height"};
+    const char* modes[] = {"Distance", "Area", "Height", "Volume"};
     int currentMode = static_cast<int>(mode_);
-    if (ImGui::Combo("Mode", &currentMode, modes, 3)) {
+    if (ImGui::Combo("Mode", &currentMode, modes, 4)) {
         mode_ = static_cast<MeasurementMode>(currentMode);
         ClearPoints();
     }
@@ -116,9 +148,11 @@ void MeasurementTool::RenderUI() {
     if (mode_ == MeasurementMode::Distance) {
         ImGui::Text("Distance: %.3f m", result_.distance);
     } else if (mode_ == MeasurementMode::Area) {
-        ImGui::Text("Area: %.3f m²", result_.area);
+        ImGui::Text("Area: %.3f m\u00B2", result_.area);
     } else if (mode_ == MeasurementMode::Height) {
         ImGui::Text("Height Diff: %.3f m", result_.heightDiff);
+    } else if (mode_ == MeasurementMode::Volume) {
+        ImGui::Text("Volume: %.3f m\u00B3", result_.volume);
     }
 }
 

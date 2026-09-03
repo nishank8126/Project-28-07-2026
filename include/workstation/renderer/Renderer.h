@@ -5,9 +5,14 @@
 #include "workstation/renderer/ImGuiOverlay.h"
 #include "workstation/renderer/VisualizationManager.h"
 #include "workstation/renderer/DebugRenderer.h"
+#include "workstation/renderer/BenchmarkTimer.h"
+#include "workstation/renderer/CadRenderer.h"
+#include "workstation/scene/SceneManager.h"
 #include "workstation/tools/ToolManager.h"
 #include "workstation/gpu/PointStreamingManager.h"
 #include "workstation/spatial/SpatialTree.h"
+#include "workstation/spatial/CoordinateNormalizationManager.h"
+#include "workstation/surface/SurfaceRenderer.h"
 
 #include "workstation/vulkan/VulkanInstance.h"
 #include "workstation/vulkan/VulkanDevice.h"
@@ -19,6 +24,7 @@
 #include "workstation/vulkan/VulkanRenderPass.h"
 #include "workstation/vulkan/VulkanAllocator.h"
 #include "workstation/pointcloud/SntFileReader.h"
+#include "workstation/cad/AttachmentManager.h"
 
 #include <memory>
 #include <vector>
@@ -84,15 +90,40 @@ public:
     // empty SntEntities to clear the overlay.
     void SetVectorOverlay(const pointcloud::SntEntities& entities);
 
+    // CAD attachment integration
+    CadRenderer& GetCadRenderer() { return cadRenderer_; }
+    const CadRenderer& GetCadRenderer() const { return cadRenderer_; }
+
+    surface::SurfaceRenderer& GetSurfaceRenderer() { return surfaceRenderer_; }
+    const surface::SurfaceRenderer& GetSurfaceRenderer() const { return surfaceRenderer_; }
+
+    scene::SceneManager& GetSceneManager() { return sceneManager_; }
+    const scene::SceneManager& GetSceneManager() const { return sceneManager_; }
+
+    void LoadDxfAttachment(cad::DxfAttachment* attachment);
+    void LoadDwgAttachment(cad::DwgAttachment* attachment);
+    void LoadSntAttachment(cad::SntAttachment* attachment);
+    void RemoveDxfAttachment(cad::DxfAttachment* attachment);
+    void RemoveDwgAttachment(cad::DwgAttachment* attachment);
+    void RemoveSntAttachment(cad::SntAttachment* attachment);
+    void RemoveAllCadAttachments();
+    void SetCadLayerVisibility(const std::string& layerName, bool visible);
+
     RenderContext& GetContext() { return context_; }
     PointCloudRenderAdapter& GetAdapter() { return adapter_; }
     gpu::GPUBufferManager& GetBufferManager() { return *bufferManager_; }
     const VisibilityDebugStats& GetVisibilityStats() const { return visDebugStats_; }
+    spatial::CoordinateNormalizationManager& GetCoordNormalizer() { return coordNormalizer_; }
 
     bool IsInitialized() const { return initialized_; }
 
     void SetImGuiEnabled(bool enabled) { useImGui_ = enabled; }
     bool IsImGuiEnabled() const { return useImGui_; }
+
+    // Benchmark
+    void StartBenchmark(uint32_t frames = 300);
+    bool IsBenchmarkRunning() const { return benchmark_.IsRunning(); }
+    const BenchmarkTimer& GetBenchmarkTimer() const { return benchmark_; }
 
 private:
     bool initialized_ = false;
@@ -115,11 +146,16 @@ private:
     std::unique_ptr<gpu::PointStreamingManager> streamingManager_;
 
     PointCloudRenderAdapter adapter_;
+    CadRenderer cadRenderer_;
+    surface::SurfaceRenderer surfaceRenderer_;
+    scene::SceneManager sceneManager_;
     tools::ToolManager toolManager_;
     VisualizationManager visualizationManager_;
     DebugRenderer debugRenderer_;
+    BenchmarkTimer benchmark_;
 
     spatial::SpatialTree spatialTree_;
+    spatial::CoordinateNormalizationManager coordNormalizer_;
     std::vector<uint64_t> visibleNodeKeys_;
     std::vector<uint64_t> selectedNodeKeys_;
     VisibilityDebugStats visDebugStats_ = {};
@@ -129,10 +165,13 @@ private:
     VkPipeline pointPipeline_ = VK_NULL_HANDLE;
     VkPipeline debugPipeline_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
+    VkPipeline cadLinePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pointPipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout pointDescriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pointDescriptorPool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> pointDescriptorSets_;
+
+    surface::SurfaceInitParams surfaceInitParams_;
 
     pointcloud::PointCloud* activeCloud_ = nullptr;
 
@@ -155,8 +194,11 @@ private:
     bool CreatePointPipeline();
     bool CreateDebugPipeline();
     bool CreateLinePipeline();
+    bool CreateCadLinePipeline();
     bool CreateDescriptorResources();
     void DrawVectorOverlay(VkCommandBuffer cmd);
+    void DrawCadGeometry(VkCommandBuffer cmd);
+    void DrawSurface(VkCommandBuffer cmd);
 
     void UpdatePushConstants(VkCommandBuffer cmd);
     void BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud);

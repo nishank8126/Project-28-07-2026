@@ -5,10 +5,12 @@
 #include "workstation/tools/SectionTool.h"
 #include "workstation/tools/CrossSectionTool.h"
 #include "workstation/tools/ClassificationTool.h"
+#include "workstation/tools/CadDrawTools.h"
 
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace workstation {
 
@@ -26,6 +28,16 @@ enum class ToolType {
     Section,
     CrossSection,
     Classification,
+    // CAD Drawing tools
+    DrawPoint,
+    DrawLine,
+    DrawPolyline,
+    DrawPolygon,
+    DrawRectangle,
+    DrawCircle,
+    DrawArc,
+    DrawText,
+    DrawDimension,
     None
 };
 
@@ -47,6 +59,10 @@ public:
     CrossSectionTool* GetCrossSectionTool() { return crossSectionTool_.get(); }
     ClassificationTool* GetClassificationTool() { return classificationTool_.get(); }
 
+    CadDrawTool* GetDrawTool();
+    const std::vector<CadGeometry>& GetDrawnGeometries() const { return drawnGeometries_; }
+    void ClearDrawnGeometries() { drawnGeometries_.clear(); }
+
     void RenderUI(renderer::RenderContext& ctx);
 
     const char* GetToolName(ToolType type) const;
@@ -60,6 +76,19 @@ private:
     std::unique_ptr<SectionTool> sectionTool_;
     std::unique_ptr<CrossSectionTool> crossSectionTool_;
     std::unique_ptr<ClassificationTool> classificationTool_;
+
+    // CAD Drawing tools
+    std::unique_ptr<PointDrawTool> drawPoint_;
+    std::unique_ptr<LineDrawTool> drawLine_;
+    std::unique_ptr<PolylineDrawTool> drawPolyline_;
+    std::unique_ptr<PolygonDrawTool> drawPolygon_;
+    std::unique_ptr<RectangleDrawTool> drawRect_;
+    std::unique_ptr<CircleDrawTool> drawCircle_;
+    std::unique_ptr<ArcDrawTool> drawArc_;
+    std::unique_ptr<TextDrawTool> drawText_;
+    std::unique_ptr<DimensionDrawTool> drawDim_;
+
+    std::vector<CadGeometry> drawnGeometries_;
 };
 
 } // namespace tools

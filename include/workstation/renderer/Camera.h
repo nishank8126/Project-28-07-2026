@@ -39,13 +39,13 @@ public:
     void MoveRight(double distance);
     void MoveUp(double distance);
     void Rotate(double yawDegrees, double pitchDegrees);
-    void Zoom(double factor);
+        void Zoom(double factor);
     void Pan(double dx, double dy);
 
-    const math::Matrix4d& GetViewMatrix();
-    const math::Matrix4d& GetProjectionMatrix();
-    const math::Matrix4d& GetViewProjectionMatrix();
-    const FrustumPlanes& GetFrustumPlanes();
+    const math::Matrix4d& GetViewMatrix() const;
+    const math::Matrix4d& GetProjectionMatrix() const;
+    const math::Matrix4d& GetViewProjectionMatrix() const;
+    const FrustumPlanes& GetFrustumPlanes() const;
 
     math::Point3d GetPosition() const { return position_; }
     math::Point3d GetTarget() const { return target_; }
@@ -80,15 +80,15 @@ private:
 
     CameraProjection projectionType_ = CameraProjection::Perspective;
 
-    math::Matrix4d viewMatrix_;
-    math::Matrix4d projectionMatrix_;
-    math::Matrix4d viewProjectionMatrix_;
-    FrustumPlanes frustumPlanes_;
-    bool dirty_ = true;
+    mutable math::Matrix4d viewMatrix_;
+    mutable math::Matrix4d projectionMatrix_;
+    mutable math::Matrix4d viewProjectionMatrix_;
+    mutable FrustumPlanes frustumPlanes_;
+    mutable bool dirty_ = true;
 
-    void UpdateMatrices();
-    math::Matrix4d ComputeViewMatrix();
-    math::Matrix4d ComputeProjectionMatrix();
+    void UpdateMatrices() const;
+    math::Matrix4d ComputeViewMatrix() const;
+    math::Matrix4d ComputeProjectionMatrix() const;
 };
 
 } // namespace renderer

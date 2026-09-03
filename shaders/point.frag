@@ -2,6 +2,8 @@
 
 layout(location = 0) in vec4 inColor;
 layout(location = 1) in float inDepth;
+layout(location = 2) in vec3 inWorldPos;
+layout(location = 3) in vec3 inNormal;
 
 layout(location = 0) out vec4 outColor;
 
@@ -16,6 +18,14 @@ layout(push_constant) uniform PushConstants {
     float intensityMax;
     float elevationMin;
     float elevationMax;
+    float depthMin;
+    float depthMax;
+    float surfaceAmbient;
+    float surfaceDiffuse;
+    float surfaceSpecular;
+    float surfaceShininess;
+    float edlStrength;
+    float _pad0;
 };
 
 void main() {

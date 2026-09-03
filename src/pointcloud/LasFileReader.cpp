@@ -3,6 +3,7 @@
 #include "workstation/pointcloud/PointCloudNode.h"
 #include "workstation/pointcloud/PointAttributeChannel.h"
 #include "workstation/pointcloud/BoundingBox.h"
+#include "workstation/spatial/CoordinateNormalizationManager.h"
 
 #include <laszip_api.h>
 
@@ -31,7 +32,8 @@ std::string BaseName(const std::string& path) {
 
 } // namespace
 
-bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string* errorMessage) {
+bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string* errorMessage,
+                  spatial::CoordinateNormalizationManager* sharedNormalizer) {
     laszip_POINTER reader = nullptr;
     if (laszip_create(&reader)) {
         if (errorMessage) *errorMessage = "laszip_create failed";
@@ -131,10 +133,25 @@ bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string*
 
     // Points in a LAS file are typically large UTM-style coordinates;
     // recenter around the actual data's midpoint so float32 storage keeps
-    // precision.
-    double originX = (minX + maxX) * 0.5;
-    double originY = (minY + maxY) * 0.5;
-    double originZ = (minZ + maxZ) * 0.5;
+    // precision. If a shared normalizer already has an origin (set by a
+    // previously loaded SNT attachment or point cloud), reuse it instead of
+    // this file's own midpoint so the two register in the same local space -
+    // otherwise every file recenters independently and nothing lines up.
+    double originX, originY, originZ;
+    if (sharedNormalizer && sharedNormalizer->IsNormalized()) {
+        sharedNormalizer->GetOrigin(originX, originY, originZ);
+    } else {
+        originX = (minX + maxX) * 0.5;
+        originY = (minY + maxY) * 0.5;
+        originZ = (minZ + maxZ) * 0.5;
+        if (sharedNormalizer) {
+            spatial::BoundingBox worldBounds;
+            worldBounds.minX = minX; worldBounds.maxX = maxX;
+            worldBounds.minY = minY; worldBounds.maxY = maxY;
+            worldBounds.minZ = minZ; worldBounds.maxZ = maxZ;
+            sharedNormalizer->RecomputeFromBoundingBox(worldBounds);
+        }
+    }
 
     std::vector<float> positions(readCount * 3);
     for (size_t i = 0; i < readCount; ++i) {

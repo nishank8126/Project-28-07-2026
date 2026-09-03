@@ -9,22 +9,24 @@ namespace renderer {
 class RenderContext;
 
 // NOTE: this order must match shaders/point.vert and point.frag's
-// `switch (visualizationMode)` case numbers exactly (their case bodies were
-// authored in this order: RGB=0 .. NormalShading=5, Density=6), not the
-// order the modes happen to be listed/described elsewhere.
+// `switch (visualizationMode)` case numbers exactly.
 enum class VisualizationMode {
-    RGB,
-    Intensity,
-    Classification,
-    Elevation,
-    HeightRamp,
-    NormalShading,
-    Density,
-    ReturnNumber,
-    ScanAngle,
-    gpsTime,
-    User,
-    Debug
+    RGB,                // 0
+    Intensity,          // 1
+    Classification,     // 2
+    Elevation,          // 3
+    HeightRamp,         // 4
+    NormalShading,      // 5
+    Density,            // 6
+    ReturnNumber,       // 7
+    ScanAngle,          // 8
+    gpsTime,            // 9
+    User,               // 10
+    Debug,              // 11
+    DepthShading,       // 12 - distance-from-camera colouring
+    SurfaceShading,     // 13 - normals + depth composite
+    EyeDomeLighting,    // 14 - screen-space edge-darkening (simplified)
+    ClassificationPalette, // 15 - full ASPRS palette (18 classes)
 };
 
 struct VisualizationPreset {
@@ -36,6 +38,12 @@ struct VisualizationPreset {
     float elevationMax = 1000.0f;
     uint32_t primaryColor = 0xFFFFFFFF;
     uint32_t secondaryColor = 0xFF0000FF;
+};
+
+// ASPRS LAS 1.4 classification palette (18 standard classes).
+// Each entry is an {R,G,B} float triple.
+struct ClassificationPaletteEntry {
+    float r, g, b;
 };
 
 class VisualizationManager {
@@ -61,6 +69,26 @@ public:
     void SetBackgroundMode(bool dark) { darkBackground_ = dark; }
     bool IsDarkBackground() const { return darkBackground_; }
 
+    // Depth / Surface shading parameters
+    void SetDepthShadingRange(float minDist, float maxDist);
+    float GetDepthShadingMin() const { return depthMin_; }
+    float GetDepthShadingMax() const { return depthMax_; }
+
+    void SetSurfaceShadingParams(float ambient, float diffuse, float specular, float shininess);
+    float GetSurfaceAmbient() const { return surfaceAmbient_; }
+    float GetSurfaceDiffuse() const { return surfaceDiffuse_; }
+    float GetSurfaceSpecular() const { return surfaceSpecular_; }
+    float GetSurfaceShininess() const { return surfaceShininess_; }
+
+    // Eye-dome lighting strength
+    void SetEDLStrength(float s) { edlStrength_ = s; }
+    float GetEDLStrength() const { return edlStrength_; }
+
+    // ASPRS classification palette (18 classes)
+    static constexpr int kClassificationClassCount = 18;
+    const ClassificationPaletteEntry* GetClassificationPalette() const { return classificationPalette_; }
+    void SetClassificationColor(int cls, float r, float g, float b);
+
     const std::string& GetModeName(VisualizationMode mode) const;
     const std::vector<VisualizationPreset>& GetPresets() const { return presets_; }
     void ApplyPreset(uint32_t index);
@@ -76,10 +104,25 @@ private:
     uint32_t customColor_ = 0xFFFFFFFF;
     bool darkBackground_ = true;
 
+    // Depth shading
+    float depthMin_ = 0.0f;
+    float depthMax_ = 1000.0f;
+    // Surface shading
+    float surfaceAmbient_ = 0.2f;
+    float surfaceDiffuse_ = 0.7f;
+    float surfaceSpecular_ = 0.3f;
+    float surfaceShininess_ = 32.0f;
+    // Eye-dome lighting
+    float edlStrength_ = 1.0f;
+
+    // ASPRS LAS 1.4 classification palette (18 standard classes)
+    ClassificationPaletteEntry classificationPalette_[kClassificationClassCount] = {};
+
     std::vector<VisualizationPreset> presets_;
     std::vector<std::string> modeNames_;
 
     void CreateDefaultPresets();
+    void InitializeClassificationPalette();
 };
 
 } // namespace renderer

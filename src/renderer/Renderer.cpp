@@ -37,9 +37,18 @@ struct PointPushConstants {
     float intensityMax;         //  4 bytes
     float elevationMin;         //  4 bytes
     float elevationMax;         //  4 bytes
-};                              // Total: 124 bytes
-static_assert(sizeof(PointPushConstants) == 124,
-    "PointPushConstants must be exactly 124 bytes to match GLSL shaders");
+    // -- new fields for Depth/Surface/EDL modes --
+    float depthMin;             //  4 bytes
+    float depthMax;             //  4 bytes
+    float surfaceAmbient;       //  4 bytes
+    float surfaceDiffuse;       //  4 bytes
+    float surfaceSpecular;      //  4 bytes
+    float surfaceShininess;     //  4 bytes
+    float edlStrength;          //  4 bytes
+    float _pad0;                //  4 bytes (alignment / future use)
+};                              // Total: 156 bytes
+static_assert(sizeof(PointPushConstants) == 156,
+    "PointPushConstants must be exactly 156 bytes to match GLSL shaders");
 } // namespace
 
 Renderer::~Renderer() { Shutdown(); }
@@ -192,6 +201,25 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreateLinePipeline failed\n");
         return false;
     }
+    if (!CreateCadLinePipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreateCadLinePipeline failed\n");
+        return false;
+    }
+
+    cadRenderer_.Initialize(&vulkan::VulkanAllocator::Get());
+    cadRenderer_.SetCoordinateNormalizer(&coordNormalizer_);
+
+    surfaceInitParams_.device = device_.get();
+    surfaceInitParams_.allocator = &vulkan::VulkanAllocator::Get();
+    surfaceInitParams_.pipelineManager = pipelineManager_.get();
+    surfaceInitParams_.shaderManager = shaderManager_.get();
+    surfaceInitParams_.descriptorManager = descriptorManager_.get();
+    surfaceInitParams_.swapchain = swapchain_.get();
+    surfaceInitParams_.renderPass = renderPass_.get();
+    surfaceRenderer_.Initialize(surfaceInitParams_);
+
+    sceneManager_.Initialize();
+    sceneManager_.SetCadRenderer(&cadRenderer_);
 
     context_.SetViewportSize(config.initialWidth, config.initialHeight);
     context_.GetVisibilitySystem().Initialize(&spatialTree_);
@@ -246,6 +274,9 @@ void Renderer::Shutdown() {
     bufferManager_->Shutdown();
     renderPass_->Shutdown();
     shaderManager_->Shutdown();
+    surfaceRenderer_.Shutdown();
+    sceneManager_.Shutdown();
+    cadRenderer_.Shutdown();
     pipelineManager_->Shutdown();
     descriptorManager_->Shutdown();
 
@@ -277,6 +308,7 @@ void Renderer::Shutdown() {
 void Renderer::BeginFrame() {
     frameManager_->BeginFrame();
     auto& frame = frameManager_->GetCurrentFrame();
+    benchmark_.BeginFrame();
 
     VkResult result = swapchain_->AcquireNextImage(frame.imageAvailable, &frame.imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -333,7 +365,21 @@ void Renderer::RenderFrame() {
     context_.GetStats().visibleNodes = 0;
     visDebugStats_ = {};
 
-    if (activeCloud_) {
+    // Surface/Wireframe/ShadedSurface modes replace the raw point rendering
+    // entirely - only Points and Hybrid still want the point pipeline drawn.
+    // This was never gated before: the point cloud (potentially millions of
+    // points) was always drawn regardless of display mode, so it visually
+    // swamped a much sparser generated mesh (capped at 15,000 points) sitting
+    // underneath it, making the surface effectively invisible even though it
+    // really was being generated and rendered.
+    bool wantPointDraw = true;
+    if (surfaceRenderer_.IsVisible() && surfaceRenderer_.GetMeshCount() > 0) {
+        auto surfMode = surfaceRenderer_.GetMode();
+        wantPointDraw = (surfMode == surface::SurfaceMode::Points ||
+                          surfMode == surface::SurfaceMode::Hybrid);
+    }
+
+    if (activeCloud_ && wantPointDraw) {
         auto& cfg = context_.GetConfig();
         bool useDebug = (cfg.visualizationMode == VisualizationMode::Debug);
 
@@ -372,12 +418,50 @@ void Renderer::RenderFrame() {
 
                 DrawVisibleNodes(cmd);
             } else {
-                fprintf(stderr, "[Renderer] WARNING: No visible or selected nodes!\n");
+                // A loaded, non-empty cloud with zero nodes surviving culling
+                // is a culling/framing bug, not a legitimate "nothing to draw"
+                // state - the camera may have ended up positioned such that
+                // the frustum test misses the single all-encompassing spatial
+                // node. Rather than leave the viewport blank, fall back to the
+                // same direct draw the debug/forceDrawAll path already uses so
+                // the loaded data stays visible regardless of that bug.
+                {
+                    auto& diagCam = context_.GetCamera();
+                    auto eye = diagCam.GetPosition();
+                    auto tgt = diagCam.GetTarget();
+                    fprintf(stderr, "[Renderer] WARNING: No visible or selected nodes! "
+                                     "eye=(%.3f,%.3f,%.3f) target=(%.3f,%.3f,%.3f) "
+                                     "nodesTested=%u nodesPassed=%u - falling back to direct draw.\n",
+                                     eye.x, eye.y, eye.z, tgt.x, tgt.y, tgt.z,
+                                     visDebugStats_.totalNodes, visDebugStats_.visibleNodes);
+                }
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                UpdatePushConstants(cmd);
+
+                for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
+                    if (!geo || geo->GetPointCount() == 0) continue;
+
+                    geo->BindPosition(cmd, 0);
+                    geo->BindColor(cmd, 1);
+                    geo->BindIntensity(cmd, 2);
+                    geo->BindClassification(cmd, 3);
+                    geo->BindNormal(cmd, 4);
+
+                    geo->Draw(cmd);
+                    context_.GetStats().drawCalls++;
+                }
             }
         }
     }
 
     DrawVectorOverlay(cmd);
+    DrawCadGeometry(cmd);
+    DrawSurface(cmd);
+
+    if (sceneManager_.GetObjectCount() > 0) {
+        sceneManager_.Update();
+        sceneManager_.SubmitRenderCommands(context_.GetRenderQueue(), cadLinePipeline_, pointPipelineLayout_);
+    }
 
     if (useImGui_ && imguiOverlay_) {
         imguiOverlay_->BeginFrame();
@@ -387,6 +471,7 @@ void Renderer::RenderFrame() {
             imguiOverlay_->RenderLODPanel(context_);
             imguiOverlay_->RenderVisualizationManagerPanel(visualizationManager_, context_);
             imguiOverlay_->RenderVisibilityPanel(visDebugStats_, context_.GetConfig());
+            imguiOverlay_->RenderSurfacePanel(surfaceRenderer_, context_);
             imguiOverlay_->RenderToolsPanel(toolManager_, context_);
             imguiOverlay_->RenderDebugOverlay(debugRenderer_, context_);
 
@@ -396,6 +481,13 @@ void Renderer::RenderFrame() {
             cfg.visualizationMode = visualizationManager_.GetMode();
             cfg.intensityMin = visualizationManager_.GetIntensityMin();
             cfg.intensityMax = visualizationManager_.GetIntensityMax();
+            cfg.depthMin = visualizationManager_.GetDepthShadingMin();
+            cfg.depthMax = visualizationManager_.GetDepthShadingMax();
+            cfg.surfaceAmbient = visualizationManager_.GetSurfaceAmbient();
+            cfg.surfaceDiffuse = visualizationManager_.GetSurfaceDiffuse();
+            cfg.surfaceSpecular = visualizationManager_.GetSurfaceSpecular();
+            cfg.surfaceShininess = visualizationManager_.GetSurfaceShininess();
+            cfg.edlStrength = visualizationManager_.GetEDLStrength();
 
             imguiOverlay_->Render(cmd);
     }
@@ -436,6 +528,11 @@ void Renderer::EndFrame() {
     frameManager_->EndFrame();
     frameStarted_ = false;
 
+    benchmark_.EndFrame(context_.GetStats().visiblePoints);
+    if (!benchmark_.IsRunning() && benchmark_.GetResult().totalFrames > 0) {
+        benchmark_.PrintSummary();
+    }
+
     uint64_t now = SDL_GetPerformanceCounter();
     double delta = static_cast<double>(now - lastFrameTime_) / SDL_GetPerformanceFrequency();
     context_.UpdateFrameStats(delta * 1000.0);
@@ -451,6 +548,13 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
         if (root) {
             fprintf(stderr, "[Renderer] SetPointCloud: %llu points, cloud='%s'\n",
                     cloud->PointCount(), cloud->Name());
+
+            // Coordinate normalization now happens at load time: LoadLasFile
+            // (see LasFileReader.cpp) establishes coordNormalizer_'s shared
+            // origin on the first load and reuses it on every load after -
+            // including one already set by an SNT attachment - so recomputing
+            // it here from this cloud's own (already-recentered) local bounds
+            // would just clobber whatever origin the data was placed against.
 
             context_.GetCamera().FocusOnBounds(root->bounds());
 
@@ -559,6 +663,84 @@ void Renderer::DrawVectorOverlay(VkCommandBuffer cmd) {
     VkDeviceSize offs[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, bufs, offs);
     vkCmdDraw(cmd, overlayVertexCount_, 1, 0, 0);
+}
+
+void Renderer::DrawCadGeometry(VkCommandBuffer cmd) {
+    if (!cadRenderer_.HasGeometry()) return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cadLinePipeline_);
+    UpdatePushConstants(cmd);
+
+    if (cadRenderer_.GetLineVertexCount() > 0) {
+        VkBuffer bufs[] = {cadRenderer_.GetLineVertexBuffer().buffer};
+        VkDeviceSize offs[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, bufs, offs);
+        vkCmdDraw(cmd, cadRenderer_.GetLineVertexCount(), 1, 0, 0);
+    }
+
+    if (cadRenderer_.GetPointVertexCount() > 0) {
+        VkBuffer bufs[] = {cadRenderer_.GetPointVertexBuffer().buffer};
+        VkDeviceSize offs[] = {0};
+        vkCmdBindVertexBuffers(cmd, 0, 1, bufs, offs);
+        vkCmdDraw(cmd, cadRenderer_.GetPointVertexCount(), 1, 0, 0);
+    }
+}
+
+void Renderer::DrawSurface(VkCommandBuffer cmd) {
+    if (!surfaceRenderer_.IsVisible() || surfaceRenderer_.GetMeshCount() == 0) return;
+
+    auto& cam = context_.GetCamera();
+
+    // Preserve the user's display mode / shading selection that was stored on
+    // the renderer (see ViewportWindow::SetSurfaceMode / SetSurfaceShading),
+    // only re-syncing the per-frame lighting values from the config.
+    auto params = surfaceRenderer_.GetParams();
+
+    auto& cfg = context_.GetConfig();
+    params.ambient = cfg.surfaceAmbient;
+    params.diffuse = cfg.surfaceDiffuse;
+    params.specular = cfg.surfaceSpecular;
+    params.shininess = cfg.surfaceShininess;
+    params.depthMin = cfg.depthMin;
+    params.depthMax = cfg.depthMax;
+    params.edlStrength = cfg.edlStrength;
+    params.lightDirX = cfg.surfaceLightDirX;
+    params.lightDirY = cfg.surfaceLightDirY;
+    params.lightDirZ = cfg.surfaceLightDirZ;
+
+    surfaceRenderer_.Render(cmd, cam, params);
+}
+
+void Renderer::LoadDxfAttachment(cad::DxfAttachment* attachment) {
+    cadRenderer_.LoadDxfAttachment(attachment);
+}
+
+void Renderer::LoadDwgAttachment(cad::DwgAttachment* attachment) {
+    cadRenderer_.LoadDwgAttachment(attachment);
+}
+
+void Renderer::LoadSntAttachment(cad::SntAttachment* attachment) {
+    cadRenderer_.LoadSntAttachment(attachment);
+}
+
+void Renderer::RemoveDxfAttachment(cad::DxfAttachment* attachment) {
+    cadRenderer_.RemoveAttachment(attachment);
+}
+
+void Renderer::RemoveDwgAttachment(cad::DwgAttachment* attachment) {
+    cadRenderer_.RemoveAttachment(attachment);
+}
+
+void Renderer::RemoveSntAttachment(cad::SntAttachment* attachment) {
+    cadRenderer_.RemoveAttachment(attachment);
+}
+
+void Renderer::RemoveAllCadAttachments() {
+    cadRenderer_.RemoveAllAttachments();
+}
+
+void Renderer::SetCadLayerVisibility(const std::string& layerName, bool visible) {
+    cadRenderer_.SetLayerVisibility(layerName, visible);
 }
 
 void Renderer::BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud) {
@@ -712,6 +894,12 @@ void Renderer::UpdateGPUResidency() {
 
     auto& streamingStats = context_.GetStreamingDebugStats();
     streamingStats = streamingManager_->GetDebugStats();
+}
+
+void Renderer::StartBenchmark(uint32_t frames) {
+    benchmark_.BeginRun(frames);
+    fprintf(stderr, "[Renderer] Benchmark started: %u frames\n", frames);
+    fflush(stderr);
 }
 
 void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
@@ -959,6 +1147,62 @@ bool Renderer::CreateLinePipeline() {
     return linePipeline_ != VK_NULL_HANDLE;
 }
 
+bool Renderer::CreateCadLinePipeline() {
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+
+    auto shaders = shaderManager_->LoadSPIRVFiles({
+        {shaderDir + "cad_line.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
+        {shaderDir + "cad_line.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
+    });
+    for (auto& shader : shaders) {
+        if (shader.module == VK_NULL_HANDLE) {
+            fprintf(stderr, "Renderer::CreateCadLinePipeline: failed to load shaders\n");
+            return false;
+        }
+    }
+
+    vulkan::PipelineConfig pconfig;
+    pconfig.SetDefaults();
+    pconfig.colorFormat = swapchain_->GetImageFormat();
+
+    pconfig.vertexBindings = {
+        {0, sizeof(float) * 6, VK_VERTEX_INPUT_RATE_VERTEX},
+    };
+    pconfig.vertexAttributes = {
+        {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3},
+    };
+    pconfig.vertexInput.vertexBindingDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexBindings.size());
+    pconfig.vertexInput.pVertexBindingDescriptions = pconfig.vertexBindings.data();
+    pconfig.vertexInput.vertexAttributeDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexAttributes.size());
+    pconfig.vertexInput.pVertexAttributeDescriptions = pconfig.vertexAttributes.data();
+
+    pconfig.inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    pconfig.depthStencil.depthTestEnable = VK_TRUE;
+    pconfig.depthStencil.depthWriteEnable = VK_FALSE;
+    pconfig.rasterizer.cullMode = VK_CULL_MODE_NONE;
+    pconfig.rasterizer.lineWidth = 1.0f;
+
+    cadLinePipeline_ = pipelineManager_->CreateGraphicsPipeline(
+        pointPipelineLayout_, shaders, pconfig, renderPass_->GetRenderPass());
+
+    for (auto& shader : shaders) {
+        shaderManager_->DestroyShaderModule(shader.module);
+    }
+
+    fprintf(stderr, "[Renderer] CAD line pipeline created: %s\n",
+            cadLinePipeline_ != VK_NULL_HANDLE ? "OK" : "FAILED");
+    fflush(stderr);
+    return cadLinePipeline_ != VK_NULL_HANDLE;
+}
+
 bool Renderer::CreateDescriptorResources() {
     return true;
 }
@@ -995,6 +1239,14 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.intensityMax = cfg.intensityMax;
     pc.elevationMin = cfg.elevationMin;
     pc.elevationMax = cfg.elevationMax;
+    // New depth/surface/EDL parameters
+    pc.depthMin = cfg.depthMin;
+    pc.depthMax = cfg.depthMax;
+    pc.surfaceAmbient = cfg.surfaceAmbient;
+    pc.surfaceDiffuse = cfg.surfaceDiffuse;
+    pc.surfaceSpecular = cfg.surfaceSpecular;
+    pc.surfaceShininess = cfg.surfaceShininess;
+    pc.edlStrength = cfg.edlStrength;
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

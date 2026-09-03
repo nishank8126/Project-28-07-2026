@@ -2,6 +2,7 @@
 #include "workstation/renderer/Renderer.h"
 #include "workstation/renderer/DebugRenderer.h"
 #include "workstation/renderer/VisualizationManager.h"
+#include "workstation/surface/SurfaceRenderer.h"
 #include "workstation/tools/ToolManager.h"
 #include "workstation/tools/SelectionTool.h"
 #include "workstation/tools/MeasurementTool.h"
@@ -286,6 +287,41 @@ void ImGuiOverlay::RenderVisualizationManagerPanel(VisualizationManager& vizMana
     ImGui::Begin("Visualization Manager");
 
     vizManager.RenderUI(context);
+
+    ImGui::End();
+}
+
+void ImGuiOverlay::RenderSurfacePanel(surface::SurfaceRenderer& surfaceRenderer,
+                                       RenderContext& context) {
+    ImGui::SetNextWindowPos(ImVec2(630, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 220), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Surface");
+
+    auto& stats = context.GetStats();
+    ImGui::Text("FPS:            %.1f", stats.fps);
+    ImGui::Separator();
+
+    // Live geometry counters (accurate regardless of which generation path
+    // -- direct or cached -- produced the meshes).
+    ImGui::Text("Meshes:         %u", surfaceRenderer.GetMeshCount());
+    ImGui::Text("Vertices:       %u", surfaceRenderer.GetTotalVertexCount());
+    ImGui::Text("Triangles:      %u", surfaceRenderer.GetTotalTriangleCount());
+    ImGui::Text("GPU Memory:     %.2f MB",
+                surfaceRenderer.GetGPUMemoryUsage() / (1024.0 * 1024.0));
+    ImGui::Separator();
+
+    // Phase 12 metrics from the most recent Generate() run.
+    const auto& gen = surfaceRenderer.GetLastGenerationStats();
+    ImGui::Text("Input Points:   %zu", gen.inputPointCount);
+    ImGui::Text("Filtered:       %zu", gen.filteredPointCount);
+    ImGui::Text("Generation:     %.2f ms", gen.generationTimeMs);
+    ImGui::Text("Triangulation:  %.2f ms", gen.triangulationTimeMs);
+    ImGui::Text("Normals:        %.2f ms", gen.normalTimeMs);
+    ImGui::Text("Colour Lookup:  %.2f ms", gen.colorTimeMs);
+    if (gen.generationTimeMs > 0.0) {
+        ImGui::Text("Throughput:     %.0f k tris/s",
+                    (gen.triangleCount / gen.generationTimeMs));
+    }
 
     ImGui::End();
 }

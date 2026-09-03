@@ -12,6 +12,10 @@ namespace tools {
 class ToolManager;
 }
 
+namespace surface {
+class SurfaceRenderer;
+}
+
 namespace renderer {
 
 struct VisibilityDebugStats;
@@ -39,6 +43,7 @@ public:
     void RenderToolsPanel(tools::ToolManager& toolManager, RenderContext& context);
     void RenderDebugOverlay(DebugRenderer& debugRenderer, RenderContext& context);
     void RenderVisualizationManagerPanel(VisualizationManager& vizManager, RenderContext& context);
+    void RenderSurfacePanel(surface::SurfaceRenderer& surfaceRenderer, RenderContext& context);
 
     bool IsInitialized() const { return initialized_; }
 

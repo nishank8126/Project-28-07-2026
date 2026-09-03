@@ -122,9 +122,9 @@ void SelectionTool::RenderUI() {
     ImGui::Text("Selection Tool");
     ImGui::Separator();
 
-    const char* modes[] = {"Point", "Rectangle", "Polygon", "Box", "Radius"};
+    const char* modes[] = {"Point", "Rectangle", "Polygon", "Box", "Radius", "Fence"};
     int currentMode = static_cast<int>(mode_);
-    if (ImGui::Combo("Mode", &currentMode, modes, 5)) {
+    if (ImGui::Combo("Mode", &currentMode, modes, 6)) {
         mode_ = static_cast<SelectionMode>(currentMode);
     }
 
@@ -133,6 +133,14 @@ void SelectionTool::RenderUI() {
         if (ImGui::SliderFloat("Radius", &r, 0.1f, 1000.0f)) {
             radius_ = r;
         }
+    }
+
+    if (mode_ == SelectionMode::Fence) {
+        float w = static_cast<float>(fenceWidth_);
+        if (ImGui::SliderFloat("Fence Width", &w, 0.1f, 500.0f)) {
+            fenceWidth_ = w;
+        }
+        ImGui::Text("Click to place fence vertices. Close to finish.");
     }
 
     ImGui::Separator();

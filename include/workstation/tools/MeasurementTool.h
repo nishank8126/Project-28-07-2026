@@ -13,6 +13,7 @@ enum class MeasurementMode {
     Distance,
     Area,
     Height,
+    Volume,
     None
 };
 
@@ -26,6 +27,7 @@ struct MeasurementResult {
     double distance = 0.0;
     double area = 0.0;
     double heightDiff = 0.0;
+    double volume = 0.0;
     std::vector<MeasurementPoint> points;
     std::string label;
 };

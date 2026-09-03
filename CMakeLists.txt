@@ -8,6 +8,12 @@ if(MSVC)
     add_compile_options(/W4 /permissive-)
 endif()
 
+# Enable OpenMP for parallel shading computation
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+endif()
+
 # ---- External Dependencies ----
 # The LunarG Vulkan SDK (VULKAN_SDK) also bundles SDL3/VMA config + headers
 # under the same tree, so widen the search path to find them all.
@@ -109,6 +115,9 @@ add_library(workstation
     src/query/PointCloudFrustumQuery.cpp
     src/query/PointQueryExecutor.cpp
     src/spatial/SpatialTree.cpp
+    src/spatial/CoordinateNormalizationManager.cpp
+    src/spatial/OctreeBuilder.cpp
+    src/spatial/Frustum.cpp
     src/pointcloud/PointStorage.cpp
     src/pointcloud/PointAttributeChannel.cpp
     src/pointcloud/PointCloudNode.cpp
@@ -164,10 +173,12 @@ add_library(workstation
     src/renderer/ViewportPointBudget.cpp
     src/renderer/RenderContext.cpp
     src/renderer/Renderer.cpp
+    src/renderer/CadRenderer.cpp
     src/renderer/PointCloudRenderAdapter.cpp
     src/renderer/ImGuiOverlay.cpp
     src/renderer/VisualizationManager.cpp
     src/renderer/DebugRenderer.cpp
+    src/renderer/BenchmarkTimer.cpp
     # GPU layer
     src/gpu/GPUBufferManager.cpp
     src/gpu/PreparedGeometry.cpp
@@ -183,6 +194,44 @@ add_library(workstation
     src/tools/SectionTool.cpp
     src/tools/CrossSectionTool.cpp
     src/tools/ClassificationTool.cpp
+    src/tools/CadDrawTools.cpp
+    # CAD attachment system (DXF/DWG/SNT/Shading)
+    src/cad/AciColorTable.cpp
+    src/cad/LayerManager.cpp
+    src/cad/DxfFileReader.cpp
+    src/cad/DxfAttachment.cpp
+    src/cad/DwgAttachment.cpp
+    src/cad/SntAttachment.cpp
+    src/cad/ShadingDisplay.cpp
+    src/cad/AttachmentManager.cpp
+    # Display mode system
+    src/display/DisplayModeManager.cpp
+    # Unified Scene Graph
+    src/scene/SceneNode.cpp
+    src/scene/SceneManager.cpp
+    src/scene/PointCloudSceneObject.cpp
+    src/scene/CadSceneObject.cpp
+    src/scene/SceneSerializer.cpp
+    # Scene Interaction System
+    src/scene/RayPicker.cpp
+    src/scene/SceneSelectionManager.cpp
+    # Undo/Redo Command Framework
+    src/core/CommandManager.cpp
+    src/core/Commands.cpp
+    # Overlay / Selection Rendering
+    src/renderer/OverlayRenderer.cpp
+    src/renderer/SelectionRenderer.cpp
+    # Surface Reconstruction Pipeline
+    src/surface/SurfaceLog.cpp
+    src/surface/SurfaceMesh.cpp
+    src/surface/SurfaceMeshGenerator.cpp
+    src/surface/DelaunayTriangulator.cpp
+    src/surface/AdaptiveTriangulator.cpp
+    src/surface/NormalEstimator.cpp
+    src/surface/SurfaceGPUBuffer.cpp
+    src/surface/SurfaceRenderer.cpp
+    src/surface/SurfaceMeshCache.cpp
+    src/scene/SurfaceSceneObject.cpp
 )
 
 target_include_directories(workstation PUBLIC include)
@@ -216,7 +265,7 @@ add_test(NAME piece3_tests COMMAND wk_tests3)
 add_test(NAME piece4_tests COMMAND wk_tests4)
 
 # ---- Qt GUI ----
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
@@ -225,9 +274,14 @@ add_executable(wk_gui
     app/gui_main.cpp
     src/ui/MainWindow.cpp src/ui/ViewportWidget.cpp src/ui/ModelTreeWidget.cpp
     src/ui/PropertiesWidget.cpp src/ui/ToolSettingsWidget.cpp
+    src/ui/DisplayModeDialog.cpp
+    src/cad/AttachmentDialogs.cpp
     include/workstation/ui/MainWindow.h include/workstation/ui/ViewportWidget.h
     include/workstation/ui/ModelTreeWidget.h include/workstation/ui/PropertiesWidget.h
     include/workstation/ui/ToolSettingsWidget.h
+    include/workstation/ui/DisplayModeDialog.h
+    include/workstation/cad/AttachmentDialogs.h
+    include/workstation/display/DisplayModeManager.h
 )
 target_link_libraries(wk_gui PRIVATE workstation Qt6::Widgets)
 target_include_directories(wk_gui PRIVATE include)
@@ -261,6 +315,10 @@ add_executable(wk_pod_integration_tests tests/pod_integration_tests.cpp)
 target_link_libraries(wk_pod_integration_tests PRIVATE workstation)
 add_test(NAME piece_pod_integration COMMAND wk_pod_integration_tests)
 
+add_executable(wk_surface_tests tests/surface_pipeline_tests.cpp)
+target_link_libraries(wk_surface_tests PRIVATE workstation)
+add_test(NAME piece_surface COMMAND wk_surface_tests)
+
 # ---- Vulkan Renderer ----
 add_executable(wk_renderer app/renderer_main.cpp)
 target_link_libraries(wk_renderer PRIVATE workstation)
@@ -272,7 +330,7 @@ if(GLSLC)
     set(SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
     set(SHADER_DST_DIR ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${SHADER_DST_DIR})
-    foreach(SHADER point.vert point.frag line.vert line.frag)
+    foreach(SHADER point.vert point.frag line.vert line.frag debug_point.vert debug_point.frag point_classification.frag point_height.frag point_intensity.frag point_normal.frag cad_line.vert cad_line.frag cad_point.vert cad_point.frag cad_surface.vert cad_surface.frag picking.vert picking.frag selection.vert selection.frag surface.vert surface.frag)
         add_custom_command(
             OUTPUT ${SHADER_DST_DIR}/${SHADER}.spv
             COMMAND ${GLSLC} ${SHADER_SRC_DIR}/${SHADER} -o ${SHADER_DST_DIR}/${SHADER}.spv
@@ -282,7 +340,13 @@ if(GLSLC)
     endforeach()
     add_custom_target(shaders ALL DEPENDS
         ${SHADER_DST_DIR}/point.vert.spv ${SHADER_DST_DIR}/point.frag.spv
-        ${SHADER_DST_DIR}/line.vert.spv ${SHADER_DST_DIR}/line.frag.spv)
+        ${SHADER_DST_DIR}/line.vert.spv ${SHADER_DST_DIR}/line.frag.spv
+        ${SHADER_DST_DIR}/cad_line.vert.spv ${SHADER_DST_DIR}/cad_line.frag.spv
+        ${SHADER_DST_DIR}/cad_point.vert.spv ${SHADER_DST_DIR}/cad_point.frag.spv
+        ${SHADER_DST_DIR}/cad_surface.vert.spv ${SHADER_DST_DIR}/cad_surface.frag.spv
+        ${SHADER_DST_DIR}/picking.vert.spv ${SHADER_DST_DIR}/picking.frag.spv
+        ${SHADER_DST_DIR}/selection.vert.spv ${SHADER_DST_DIR}/selection.frag.spv
+        ${SHADER_DST_DIR}/surface.vert.spv ${SHADER_DST_DIR}/surface.frag.spv)
     add_dependencies(wk_renderer shaders)
     # wk_gui reads its shaders from the same CMAKE_BINARY_DIR/shaders/ output
     # (see Renderer::CreatePointPipeline's GetExeShaderDir()) -- without this,

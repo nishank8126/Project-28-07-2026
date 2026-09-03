@@ -1,5 +1,7 @@
 #include "workstation/vulkan/VulkanAllocator.h"
 
+#include <cstdio>
+
 namespace workstation {
 namespace vulkan {
 
@@ -22,7 +24,17 @@ void VulkanAllocator::Initialize(VkInstance instance, VkPhysicalDevice physicalD
     vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_);
 
     VmaAllocatorCreateInfo allocatorInfo{};
-    allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+    // Nothing in this renderer calls vkGetBufferDeviceAddress, and the
+    // logical device was never created with the bufferDeviceAddress feature
+    // enabled - so this flag just told VMA to request device-address-capable
+    // memory it has no right to ask for, tripping
+    // VUID-VkMemoryAllocateInfo-flags-03331 on every buffer allocation and
+    // making allocation success/failure driver-dependent undefined behavior.
+    // That's why some buffers (e.g. point cloud vertex buffers) happened to
+    // survive it while others (surface mesh vertex/index buffers) silently
+    // failed to allocate, leaving CreateBuffer() to return an invalid handle
+    // that UploadMesh() then discarded without a visible error.
+    allocatorInfo.flags = 0;
     allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
     allocatorInfo.physicalDevice = physicalDevice;
     allocatorInfo.device = device;
@@ -61,8 +73,15 @@ GPUBuffer VulkanAllocator::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags us
     allocInfo.usage = memoryUsage;
     allocInfo.flags = flags;
 
-    vmaCreateBuffer(allocator_, &bufferInfo, &allocInfo, &buffer.buffer,
+    VkResult result = vmaCreateBuffer(allocator_, &bufferInfo, &allocInfo, &buffer.buffer,
                     &buffer.allocation, &buffer.allocationInfo);
+    if (result != VK_SUCCESS) {
+        fprintf(stderr, "[VulkanAllocator] CreateBuffer FAILED: size=%llu usage=0x%x "
+                         "memoryUsage=%d VkResult=%d\n",
+                static_cast<unsigned long long>(size), usage, static_cast<int>(memoryUsage),
+                static_cast<int>(result));
+        return GPUBuffer{};
+    }
     buffer.mappedData = buffer.allocationInfo.pMappedData;
 
     stats_.totalAllocated += size;
@@ -141,27 +160,58 @@ VkCommandBuffer VulkanAllocator::BeginSingleTimeCommands() {
     allocInfo.commandPool = commandPool_;
     allocInfo.commandBufferCount = 1;
 
-    VkCommandBuffer cmd;
-    vkAllocateCommandBuffers(device_, &allocInfo, &cmd);
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkResult allocResult = vkAllocateCommandBuffers(device_, &allocInfo, &cmd);
+    if (allocResult != VK_SUCCESS) {
+        fprintf(stderr, "[VulkanAllocator] BeginSingleTimeCommands: "
+                         "vkAllocateCommandBuffers FAILED VkResult=%d (pool=%p device=%p)\n",
+                static_cast<int>(allocResult), (void*)commandPool_, (void*)device_);
+        return VK_NULL_HANDLE;
+    }
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(cmd, &beginInfo);
+    VkResult beginResult = vkBeginCommandBuffer(cmd, &beginInfo);
+    if (beginResult != VK_SUCCESS) {
+        fprintf(stderr, "[VulkanAllocator] BeginSingleTimeCommands: "
+                         "vkBeginCommandBuffer FAILED VkResult=%d\n",
+                static_cast<int>(beginResult));
+        vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
+        return VK_NULL_HANDLE;
+    }
 
     return cmd;
 }
 
 void VulkanAllocator::EndSingleTimeCommands(VkCommandBuffer cmd) {
-    vkEndCommandBuffer(cmd);
+    if (cmd == VK_NULL_HANDLE) return;
+
+    VkResult endResult = vkEndCommandBuffer(cmd);
+    if (endResult != VK_SUCCESS) {
+        fprintf(stderr, "[VulkanAllocator] EndSingleTimeCommands: "
+                         "vkEndCommandBuffer FAILED VkResult=%d\n",
+                static_cast<int>(endResult));
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    vkQueueSubmit(graphicsQueue_, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(graphicsQueue_);
+    VkResult submitResult = vkQueueSubmit(graphicsQueue_, 1, &submitInfo, VK_NULL_HANDLE);
+    if (submitResult != VK_SUCCESS) {
+        fprintf(stderr, "[VulkanAllocator] EndSingleTimeCommands: "
+                         "vkQueueSubmit FAILED VkResult=%d (queue=%p)\n",
+                static_cast<int>(submitResult), (void*)graphicsQueue_);
+    } else {
+        VkResult waitResult = vkQueueWaitIdle(graphicsQueue_);
+        if (waitResult != VK_SUCCESS) {
+            fprintf(stderr, "[VulkanAllocator] EndSingleTimeCommands: "
+                             "vkQueueWaitIdle FAILED VkResult=%d\n",
+                    static_cast<int>(waitResult));
+        }
+    }
 
     vkFreeCommandBuffers(device_, commandPool_, 1, &cmd);
 }

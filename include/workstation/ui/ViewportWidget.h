@@ -6,51 +6,89 @@
 #include <memory>
 #include <string>
 
+#include "workstation/scene/SceneSelectionManager.h"
+#include "workstation/renderer/SelectionRenderer.h"
+#include "workstation/renderer/OverlayRenderer.h"
+#include "workstation/core/CommandManager.h"
+#include "workstation/surface/SurfaceRenderer.h"
+#include "workstation/surface/SurfaceMeshCache.h"
+
 namespace workstation {
 
 namespace pointcloud { class PointCloud; }
 namespace renderer { class Renderer; }
+namespace scene { class SceneManager; }
+namespace cad { class DxfAttachment; class DwgAttachment; class SntAttachment; }
 
 namespace ui {
 
-// Central CAD viewport: a real QWindow (not a plain QWidget) hosting the
-// Vulkan point-cloud renderer directly against its native Win32 surface.
-//
-// This must be a QWindow embedded via QWidget::createWindowContainer()
-// rather than a QWidget painted on screen (WA_PaintOnScreen): Qt6's own
-// compositing of sibling dock widgets is unreliable with the latter and can
-// leave the natively-rendered surface invisible even while it renders
-// correctly underneath.
 class ViewportWindow : public QWindow {
     Q_OBJECT
 public:
     explicit ViewportWindow();
     ~ViewportWindow() override;
 
-    // Loads a .las/.laz file and displays it. Returns false (and fills
-    // errorMessage) on failure.
     bool LoadPointCloudFile(const QString& path, QString* errorMessage = nullptr);
 
-    // Loads a .snt file (2-D CAD vector geometry, NOT a point cloud -- see
-    // SntFileReader.h) and displays it as a line overlay. Returns false
-    // (and fills errorMessage) on failure. outEntityCount/outPolylineCount,
-    // if given, report the header's claimed entity count vs. how many
-    // polyline/shape geometries this best-effort reader actually recovered
-    // (circles and text are not decoded).
     bool LoadVectorOverlayFile(const QString& path, QString* errorMessage = nullptr,
                                 quint32* outEntityCount = nullptr,
                                 quint32* outPolylineCount = nullptr);
+
+    bool LoadDxfAttachment(cad::DxfAttachment* attachment, QString* errorMessage = nullptr);
+    bool LoadDwgAttachment(cad::DwgAttachment* attachment, QString* errorMessage = nullptr);
+    bool LoadSntAttachment(cad::SntAttachment* attachment, QString* errorMessage = nullptr);
+    void FocusCameraOnLastCadAttachment();
+    void RemoveCadAttachment(cad::DxfAttachment* attachment);
+    void RemoveCadAttachment(cad::DwgAttachment* attachment);
+    void RemoveCadAttachment(cad::SntAttachment* attachment);
+    void RemoveAllCadAttachments();
+    void SetCadLayerVisibility(const std::string& layerName, bool visible);
 
     bool IsRendererReady() const { return m_rendererInitialized; }
     double GetLastFPS() const;
     quint64 GetLoadedPointCount() const;
     void GetLoadedExtent(double& sizeX, double& sizeY, double& sizeZ) const;
 
-    // mode is a workstation::renderer::VisualizationMode value.
+    scene::SceneManager* GetSceneManager() const;
+    scene::SceneSelectionManager* GetSelectionManager() { return &selectionManager_; }
+    core::CommandManager* GetCommandManager() { return &commandManager_; }
+    renderer::SelectionRenderer* GetSelectionRenderer() { return &selectionRenderer_; }
+    renderer::OverlayRenderer* GetOverlayRenderer() { return &overlayRenderer_; }
+
     void SetVisualizationMode(int mode);
+
+    void Undo();
+    void Redo();
+
+    bool IsSelectMode() const { return selectMode_; }
+    void SetSelectMode(bool on) { selectMode_ = on; }
+
+    surface::SurfaceRenderer* GetSurfaceRenderer();
+    surface::SurfaceMeshCache* GetSurfaceCache() { return &surfaceCache_; }
+
+    void SetSurfaceMode(int mode);
+    void SetSurfaceShading(int shading);
+    void GenerateSurfaceForCloud();
+
+    // Shading quality preset: 0 Low, 1 Medium, 2 High. Tunes generation
+    // params (normal neighbourhood, max edge length) and regenerates the
+    // surface when one already exists.
+    void SetSurfaceQuality(int quality);
+    void SetSurfaceMaxEdgeLength(double maxEdgeLength);
+    void SetSurfaceNeighborRadius(double radius);
+    void SetSurfaceLightDirection(float x, float y, float z);
+    void SetSurfaceMaterial(float ambient, float diffuse, float specular, float shininess);
+    void ToggleSurface();
+
+    // Surface parameters used by the next GenerateSurfaceForCloud() call.
+    void SetSurfaceGenParams(const surface::SurfaceGenerationParams& params) { m_surfaceGenParams = params; }
+    const surface::SurfaceGenerationParams& GetSurfaceGenParams() const { return m_surfaceGenParams; }
 
 signals:
     void statusChanged(const QString& text);
+    void selectionChanged(uint64_t objectID);
+    void selectionCleared();
+    void undoStateChanged(bool canUndo, bool canRedo, const QString& undoName, const QString& redoName);
 
 protected:
     void exposeEvent(QExposeEvent* event) override;
@@ -70,6 +108,8 @@ private:
     bool InitializeRenderer();
     void ApplyHeldKeyMovement(float dt);
 
+    void HandlePicking(int mouseX, int mouseY);
+
     std::unique_ptr<renderer::Renderer> m_renderer;
     std::unique_ptr<pointcloud::PointCloud> m_cloud;
 
@@ -78,8 +118,17 @@ private:
     QPoint m_lastMousePos;
     bool m_rotating = false;
     bool m_panning = false;
+    bool selectMode_ = true;
 
     qint64 m_lastFrameTimeNs = 0;
+
+    scene::SceneSelectionManager selectionManager_;
+    core::CommandManager commandManager_;
+    renderer::SelectionRenderer selectionRenderer_;
+    renderer::OverlayRenderer overlayRenderer_;
+    surface::SurfaceMeshCache surfaceCache_;
+    surface::SurfaceGenerationParams m_surfaceGenParams;
+    bool surfaceVisible_ = false;
 };
 
 } // namespace ui

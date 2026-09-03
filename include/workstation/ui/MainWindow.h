@@ -1,10 +1,18 @@
 #pragma once
 #include <QMainWindow>
 #include "workstation/core/Document.h"
+#include <memory>
 
 class QLabel;
+class QToolBar;
+class QLineEdit;
+class QTextEdit;
 
 namespace workstation {
+namespace cad {
+class AttachmentManager;
+}
+
 namespace ui {
 
 class ViewportWindow;
@@ -12,13 +20,6 @@ class ModelTreeWidget;
 class PropertiesWidget;
 class ToolSettingsWidget;
 
-// Main application window for GUI Shell 1.
-//
-// This class is PURE IMPLEMENTATION MECHANICS (Qt window ownership, docks,
-// menus, toolbar, status bar). It contains NO CAD, geometry, view, camera,
-// rendering, or D3D11 algorithm. It links against the existing `workstation`
-// core and holds an empty Document only to demonstrate the architectural
-// connection point; no document is loaded in GUI Shell 1.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
@@ -33,21 +34,37 @@ private slots:
     void toggleModelTree(bool visible);
     void toggleProperties(bool visible);
     void toggleToolSettings(bool visible);
+    void toggleCommandConsole(bool visible);
     void onVisualizationModeSelected(int mode);
+    void onCommandEntered();
+    void onToolAction(int toolId);
+
+    void onAttachDxf();
+    void onAttachDwg();
+    void onAttachSnt();
+    void onManageAttachments();
+    void onShadingDisplay();
 
 private:
     void buildMenu();
     void buildToolBar();
     void buildStatusBar();
     void buildDockWidgets();
+    void buildCommandConsole();
+    void addCadToolActions(QToolBar* toolbar);
 
-    Document m_document;  // existing core, empty in GUI Shell 1 (no file I/O)
+    Document m_document;
     ViewportWindow*  m_viewport    = nullptr;
     ModelTreeWidget* m_modelTree   = nullptr;
     PropertiesWidget* m_properties  = nullptr;
     ToolSettingsWidget* m_toolSettings = nullptr;
 
     QLabel* m_rendererStatusLabel = nullptr;
+    QLineEdit* m_commandInput = nullptr;
+    QTextEdit* m_commandOutput = nullptr;
+    QToolBar* m_cadToolBar = nullptr;
+
+    std::unique_ptr<cad::AttachmentManager> m_attachmentManager;
 };
 
 } // namespace ui

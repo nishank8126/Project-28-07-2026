@@ -43,4 +43,28 @@ echo   point_normal.frag -^> point_normal.frag.spv
 if %ERRORLEVEL% neq 0 (echo FAILED: point_culling.comp & exit /b 1)
 echo   point_culling.comp -^> point_culling.comp.spv
 
+%GLSLC% "%SHADER_DIR%cad_line.vert" -o "%OUTPUT_DIR%/cad_line.vert.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_line.vert & exit /b 1)
+echo   cad_line.vert -^> cad_line.vert.spv
+
+%GLSLC% "%SHADER_DIR%cad_line.frag" -o "%OUTPUT_DIR%/cad_line.frag.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_line.frag & exit /b 1)
+echo   cad_line.frag -^> cad_line.frag.spv
+
+%GLSLC% "%SHADER_DIR%cad_point.vert" -o "%OUTPUT_DIR%/cad_point.vert.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_point.vert & exit /b 1)
+echo   cad_point.vert -^> cad_point.vert.spv
+
+%GLSLC% "%SHADER_DIR%cad_point.frag" -o "%OUTPUT_DIR%/cad_point.frag.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_point.frag & exit /b 1)
+echo   cad_point.frag -^> cad_point.frag.spv
+
+%GLSLC% "%SHADER_DIR%cad_surface.vert" -o "%OUTPUT_DIR%/cad_surface.vert.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_surface.vert & exit /b 1)
+echo   cad_surface.vert -^> cad_surface.vert.spv
+
+%GLSLC% "%SHADER_DIR%cad_surface.frag" -o "%OUTPUT_DIR%/cad_surface.frag.spv" --target-env=vulkan1.3
+if %ERRORLEVEL% neq 0 (echo FAILED: cad_surface.frag & exit /b 1)
+echo   cad_surface.frag -^> cad_surface.frag.spv
+
 echo All shaders compiled successfully.

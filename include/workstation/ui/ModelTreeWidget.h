@@ -1,31 +1,40 @@
 #pragma once
 #include <QWidget>
+#include <QTreeWidgetItem>
 
 class QTreeWidget;
 
 namespace workstation {
+
+namespace scene { class SceneManager; class SceneObject; }
 class Document;
+
 namespace ui {
 
-// Left dock content: shows the document/model tree.
-//
-// GUI Shell 1 shows the truthful empty state ("No document loaded") rather
-// than fabricating CAD elements. It reads only the existing Document/Model
-// public API; it creates no file-loading or element-inference behavior.
 class ModelTreeWidget : public QWidget {
     Q_OBJECT
 public:
     explicit ModelTreeWidget(QWidget* parent = nullptr);
 
-    // Populate from the existing core Document. With no models the tree shows
-    // the empty state. No elements are fabricated.
+    void setSceneManager(scene::SceneManager* mgr);
+    void refreshTree();
+    void setLoadedPointCloud(const QString& name, quint64 pointCount);
     void setDocument(const Document* document);
 
-    // Shows the currently loaded point cloud file as the tree's one entry.
-    void setLoadedPointCloud(const QString& name, quint64 pointCount);
+signals:
+    void objectSelected(uint64_t nodeID);
+    void objectDeselected();
+
+private slots:
+    void onItemClicked(QTreeWidgetItem* item, int column);
+    void onItemDoubleClicked(QTreeWidgetItem* item, int column);
 
 private:
+    void addObjectItems();
+    void addLayerItems();
+
     QTreeWidget* m_tree = nullptr;
+    scene::SceneManager* m_sceneManager = nullptr;
 };
 
 } // namespace ui

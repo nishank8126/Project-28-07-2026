@@ -42,6 +42,20 @@ struct RenderConfig {
     bool lodEnabled = true;
     float pointBudgetMillions = 25.0f;
     int32_t forceLODLevel = -1;
+
+    // Depth / Surface shading parameters
+    float depthMin = 0.0f;
+    float depthMax = 1000.0f;
+    float surfaceAmbient = 0.2f;
+    float surfaceDiffuse = 0.7f;
+    float surfaceSpecular = 0.3f;
+    float surfaceShininess = 32.0f;
+    float edlStrength = 1.0f;
+    // Surface pipeline light direction (world space). Matches the
+    // SurfaceRenderParams defaults so both pipelines agree out of the box.
+    float surfaceLightDirX = 0.35f;
+    float surfaceLightDirY = 0.35f;
+    float surfaceLightDirZ = 0.87f;
 };
 
 struct RendererStats {

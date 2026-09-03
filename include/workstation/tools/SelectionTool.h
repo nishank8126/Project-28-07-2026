@@ -15,6 +15,7 @@ enum class SelectionMode {
     Polygon,
     Box,
     Radius,
+    Fence,   // polyline fence — select all points within the fence corridor
     None
 };
 
@@ -55,6 +56,9 @@ public:
     void SetRadius(double radius) { radius_ = radius; }
     double GetRadius() const { return radius_; }
 
+    void SetFenceWidth(double w) { fenceWidth_ = w; }
+    double GetFenceWidth() const { return fenceWidth_; }
+
     void RenderUI();
 
 private:
@@ -67,6 +71,7 @@ private:
     std::vector<math::Point3d> polygonPoints_;
     bool selecting_ = false;
     double radius_ = 10.0;
+    double fenceWidth_ = 5.0;
 
     spatial::BoundingBox ComputeAABB() const;
     bool IsPointInPolygon(const math::Point3d& p) const;

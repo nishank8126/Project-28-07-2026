@@ -44,6 +44,7 @@ private slots:
     void onAttachSnt();
     void onManageAttachments();
     void onShadingDisplay();
+    void onLoadClassificationPtc();
 
 private:
     void buildMenu();

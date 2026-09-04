@@ -25,7 +25,7 @@ layout(push_constant) uniform PushConstants {
     float surfaceSpecular;
     float surfaceShininess;
     float edlStrength;
-    float _pad0;
+    uint hasCustomPalette;
 };
 
 void main() {
@@ -33,6 +33,11 @@ void main() {
         // DEBUG mode: no discard, no fade, just solid color
         outColor = vec4(1.0, 0.0, 0.0, 1.0);
         return;
+    }
+
+    // Hidden classification class: alpha was set to 0 by the vertex shader.
+    if (inColor.a < 0.01) {
+        discard;
     }
 
     vec2 center = gl_PointCoord - vec2(0.5);

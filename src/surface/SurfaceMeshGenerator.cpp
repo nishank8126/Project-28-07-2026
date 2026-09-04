@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <unordered_map>
 
@@ -84,6 +85,59 @@ struct ColorLookupGrid {
         return ux * 73856093ull ^ uy * 19349663ull ^ uz * 83492791ull;
     }
 };
+
+// Splits every triangle into 3 unique vertices carrying that triangle's own
+// flat face normal (cross product of its edges), instead of the shared,
+// averaged-across-neighbours vertex normal NormalEstimator produces. This is
+// what gives a triangulated point-cloud surface the "faceted crystalline"
+// look seen in reference hillshade renderers (MicroStation, etc.): each
+// facet catches the fixed light direction independently, so adjacent facets
+// at different slopes read as distinctly different brightness rather than
+// blending smoothly into one another.
+void FlattenFaceNormals(SurfaceMesh& mesh) {
+    const auto& oldVertices = mesh.Vertices();
+    const auto& oldTriangles = mesh.Triangles();
+    if (oldTriangles.empty()) return;
+
+    std::vector<SurfaceVertex> flatVertices;
+    std::vector<SurfaceTriangle> flatTriangles;
+    flatVertices.reserve(oldTriangles.size() * 3);
+    flatTriangles.reserve(oldTriangles.size());
+
+    for (const auto& tri : oldTriangles) {
+        const SurfaceVertex& v0 = oldVertices[tri.indices[0]];
+        const SurfaceVertex& v1 = oldVertices[tri.indices[1]];
+        const SurfaceVertex& v2 = oldVertices[tri.indices[2]];
+
+        double e1[3] = {v1.position[0] - v0.position[0], v1.position[1] - v0.position[1], v1.position[2] - v0.position[2]};
+        double e2[3] = {v2.position[0] - v0.position[0], v2.position[1] - v0.position[1], v2.position[2] - v0.position[2]};
+        double nx = e1[1] * e2[2] - e1[2] * e2[1];
+        double ny = e1[2] * e2[0] - e1[0] * e2[2];
+        double nz = e1[0] * e2[1] - e1[1] * e2[0];
+        double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        float fn[3];
+        if (len > EPSILON) {
+            fn[0] = static_cast<float>(nx / len);
+            fn[1] = static_cast<float>(ny / len);
+            fn[2] = static_cast<float>(nz / len);
+        } else {
+            fn[0] = 0.0f; fn[1] = 0.0f; fn[2] = 1.0f;
+        }
+
+        uint32_t base = static_cast<uint32_t>(flatVertices.size());
+        for (int k = 0; k < 3; ++k) {
+            SurfaceVertex nv = oldVertices[tri.indices[k]];
+            nv.normal[0] = fn[0];
+            nv.normal[1] = fn[1];
+            nv.normal[2] = fn[2];
+            flatVertices.push_back(nv);
+        }
+        flatTriangles.push_back({{base, base + 1, base + 2}});
+    }
+
+    mesh.Vertices() = std::move(flatVertices);
+    mesh.Triangles() = std::move(flatTriangles);
+}
 
 } // namespace
 
@@ -203,21 +257,22 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
 
     const auto tTri = std::chrono::steady_clock::now();
     auto mesh = triangulator_.Triangulate(points, ts);
-    mesh.ComputeEdges();
     mesh.ComputeBounds();
     lastStats_.triangulationTimeMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tTri).count();
 
     if (params.computeNormals) {
-        NormalEstimationParams np;
-        np.neighborCount = params.normalNeighborCount;
-        np.neighborRadius = params.normalNeighborRadius;
-        np.useOpenMP = true;
+        // Flat per-face normals (with vertex duplication) rather than
+        // NormalEstimator's kNN-smoothed per-vertex normals: this is what
+        // produces the faceted hillshade look instead of a smoothly lit
+        // blob. Edges must be recomputed afterwards since triangle vertex
+        // indices change.
         const auto tNormal = std::chrono::steady_clock::now();
-        normalEstimator_.ComputeNormals(mesh, np);
+        FlattenFaceNormals(mesh);
         lastStats_.normalTimeMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tNormal).count();
     }
+    mesh.ComputeEdges();
 
     const auto tColor = std::chrono::steady_clock::now();
     AssignVertexColors(mesh, cloud);
@@ -231,6 +286,19 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
     lastStats_.triangleCount = mesh.TriangleCount();
     lastStats_.generationTimeMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tTotal).count();
+
+    fprintf(stderr, "[SurfaceGen] Input points: %zu\n", lastStats_.inputPointCount);
+    fprintf(stderr, "[SurfaceGen] Filtered points: %zu\n", lastStats_.filteredPointCount);
+    fprintf(stderr, "[SurfaceGen] Output vertices: %u\n", lastStats_.vertexCount);
+    fprintf(stderr, "[SurfaceGen] Triangles: %u\n", lastStats_.triangleCount);
+    fprintf(stderr, "[SurfaceGen] Normals computed: %s\n", params.computeNormals ? "yes" : "no");
+    const auto& b = mesh.GetBounds();
+    fprintf(stderr, "[SurfaceGen] Bounds: min(%.2f, %.2f, %.2f) max(%.2f, %.2f, %.2f)\n",
+            b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ);
+    fprintf(stderr, "[SurfaceGen] Timing: total=%.1fms triang=%.1fms normals=%.1fms color=%.1fms\n",
+            lastStats_.generationTimeMs, lastStats_.triangulationTimeMs,
+            lastStats_.normalTimeMs, lastStats_.colorTimeMs);
+    fflush(stderr);
 
     return mesh;
 }

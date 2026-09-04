@@ -27,6 +27,7 @@ enum class VisualizationMode {
     SurfaceShading,     // 13 - normals + depth composite
     EyeDomeLighting,    // 14 - screen-space edge-darkening (simplified)
     ClassificationPalette, // 15 - full ASPRS palette (18 classes)
+    SurfaceDebug,          // 16 - green wireframe surface debug
 };
 
 struct VisualizationPreset {

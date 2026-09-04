@@ -12,21 +12,16 @@ layout(location = 8) in float fragAlpha;
 
 layout(location = 0) out vec4 outColor;
 
-vec3 applyPhong(vec3 normal, vec3 lightDir, vec3 viewDir, vec3 color) {
-    float ambient = fragMaterial.x;
-    float diffuse = fragMaterial.y;
-    float specular = fragMaterial.z;
-    float shininess = fragMaterial.w;
-
+// MicroStation/ArcGIS-style hillshade: a single directional light, no
+// specular term. Facets facing the light saturate to full brightness while
+// neighbouring facets at a different slope stay darker -- that hard
+// facet-to-facet contrast (not a specular highlight) is what reads as the
+// crisp "faceted" look on a triangulated point-cloud surface.
+vec3 applyPhong(vec3 normal, vec3 lightDir, vec3 /*viewDir*/, vec3 color) {
+    float ambientFloor = fragMaterial.x;
     float NdotL = max(dot(normal, lightDir), 0.0);
-    vec3 reflected = reflect(-lightDir, normal);
-    float RdotV = max(dot(viewDir, reflected), 0.0);
-
-    vec3 ambientColor = ambient * color;
-    vec3 diffuseColor = diffuse * NdotL * color;
-    vec3 specularColor = specular * pow(RdotV, shininess) * vec3(1.0);
-
-    return ambientColor + diffuseColor + specularColor;
+    float shade = max(NdotL, ambientFloor);
+    return color * shade;
 }
 
 vec3 applyDepthShading(vec3 color, float depth) {
@@ -75,6 +70,9 @@ void main() {
         // Eye Dome Lighting
         color = applyPhong(N, L, V, fragColor);
         color = applyEDL(color, N, V);
+    } else if (mode < 4.5) {
+        // SurfaceDebug: green wireframe for proving triangles exist
+        color = vec3(0.0, 1.0, 0.0);
     } else {
         // Wireframe / unlit / edge color
         color = fragColor;

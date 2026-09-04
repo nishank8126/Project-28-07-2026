@@ -63,8 +63,12 @@ public:
 
             ClassEntry entry;
             entry.code = std::stoi(headerFields[0]);
-            entry.description = headerFields[1];
-            entry.level = headerFields.size() > 2 ? headerFields[2] : "";
+            // ENEL PTC format: description is in field[2] (field[1] is empty).
+            // Standard PTC: description in field[1].
+            entry.description = headerFields.size() > 1 && !headerFields[1].empty()
+                ? headerFields[1]
+                : (headerFields.size() > 2 ? headerFields[2] : "");
+            entry.level = headerFields.size() > 3 ? headerFields[3] : "";
             entry.drawMode = detailFields.size() > 1 ? detailFields[1] : "";
 
             if (detailFields.size() > 3) {
@@ -76,7 +80,14 @@ public:
                 }
             }
 
-            entry.visible = detailFields.size() > 4 && detailFields[4] == "1";
+            // PTC visibility: some files use "0"/"1" booleans, others use
+            // weight/priority values (0,1,2,5,7). Treat "0" and empty as
+            // hidden; everything else as visible.
+            entry.visible = true;
+            if (detailFields.size() > 4) {
+                const auto& vis = detailFields[4];
+                entry.visible = !vis.empty() && vis != "0";
+            }
             entry.weight = detailFields.size() > 5 ? std::stof(detailFields[5]) : 1.0f;
 
             outPalette[entry.code] = entry;

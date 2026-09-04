@@ -272,13 +272,33 @@ void SurfaceRenderer::ClearAllMeshes() {
 }
 
 void SurfaceRenderer::GenerateSurfaceFromCloud(pointcloud::PointCloud& cloud,
-                                                 const SurfaceGenerationParams& params) {
+                                                  const SurfaceGenerationParams& params) {
     auto mesh = meshGenerator_.Generate(cloud, params);
     lastGenStats_ = meshGenerator_.GetLastStats();
     if (!mesh.IsEmpty()) {
         mesh.SetName(cloud.Name() ? cloud.Name() : "Surface");
         AddSurfaceMesh(mesh);
     }
+}
+
+void SurfaceRenderer::GenerateLODs(pointcloud::PointCloud& cloud,
+                                    const SurfaceGenerationParams& params) {
+    lodManager_.GenerateLODs(cloud, params);
+
+    ClearAllMeshes();
+
+    for (uint32_t i = 0; i < lodManager_.GetLODCount(); ++i) {
+        const auto* mesh = lodManager_.GetMesh(i);
+        if (mesh && !mesh->IsEmpty()) {
+            SurfaceMesh m = *mesh;
+            m.SetName(std::string("LOD") + std::to_string(i));
+            AddSurfaceMesh(m);
+        }
+    }
+
+    fprintf(stderr, "[SurfaceRenderer] LOD generation complete: %u levels, %u meshes in GPU\n",
+            lodManager_.GetLODCount(), GetMeshCount());
+    fflush(stderr);
 }
 
 void SurfaceRenderer::UpdatePushConstants(VkCommandBuffer cmd,
@@ -339,7 +359,6 @@ void SurfaceRenderer::UpdatePushConstants(VkCommandBuffer cmd,
 
 void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera,
                                const SurfaceRenderParams& params) {
-    // ---- render decision logging: only on state changes (no frame spam) --
     const char* skip = nullptr;
     if (!initialized_)                    skip = "not-initialized";
     else if (!visible_)                   skip = "hidden";
@@ -360,15 +379,27 @@ void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera
         params_.mode = params.mode;
     }
 
-    // Points mode is served entirely by the existing point pipeline (the
-    // Renderer draws points before invoking the surface pass), so there is
-    // nothing to draw here.
     if (params_.mode == SurfaceMode::Points) {
         if (lastRenderState_ != "points-mode") {
             SLOG_INFO("Render: points mode - surface pass idle");
             lastRenderState_ = "points-mode";
         }
         return;
+    }
+
+    // Frustum culling: skip entire surface if bounds are outside the view.
+    if (lodManager_.GetLODCount() > 0 && !lodManager_.IsVisible(camera)) {
+        if (lastRenderState_ != "frustum-culled") {
+            SLOG_INFO("Render: frustum culled");
+            lastRenderState_ = "frustum-culled";
+        }
+        return;
+    }
+
+    // LOD selection: pick the mesh level appropriate for current camera distance.
+    uint32_t activeLOD = 0;
+    if (lodManager_.GetLODCount() > 0) {
+        activeLOD = lodManager_.SelectLOD(camera);
     }
 
     const bool drawTriangles =
@@ -385,34 +416,40 @@ void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera
     }
     if (activePipeline == VK_NULL_HANDLE) return;
 
-    const char* active = (activePipeline == wireframePipeline_) ? "wireframe" : "fill";
-    if (lastRenderState_ != active) {
-        SLOG_INFO("Render: drawing mode=%d pipeline=%s meshes=%u tris=%zu",
-                  static_cast<int>(params_.mode), active,
-                  static_cast<uint32_t>(meshes_.size()),
-                  static_cast<size_t>(GetTotalTriangleCount()));
-        lastRenderState_ = active;
-    }
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
     UpdatePushConstants(cmd, camera);
 
-    for (const auto& entry : meshes_) {
-        if (entry->dirty && allocator_) {
-            const_cast<SurfaceMeshEntry*>(entry.get())->mesh.ComputeEdges();
-            const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Shutdown();
-            const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Initialize(*allocator_);
-            const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).UploadMesh(entry->mesh);
-            const_cast<SurfaceMeshEntry*>(entry.get())->dirty = false;
-        }
-
-        if (drawWireframe) {
-            if (entry->gpuBuffer.HasEdges()) {
-                entry->gpuBuffer.DrawIndexedEdges(cmd);
+    // With LOD, draw only the mesh at the selected LOD level.
+    // Without LOD, draw all meshes (legacy single-mesh path).
+    if (lodManager_.GetLODCount() > 0) {
+        if (activeLOD < meshes_.size()) {
+            auto& entry = meshes_[activeLOD];
+            if (entry->dirty && allocator_) {
+                const_cast<SurfaceMeshEntry*>(entry.get())->mesh.ComputeEdges();
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Shutdown();
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Initialize(*allocator_);
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).UploadMesh(entry->mesh);
+                const_cast<SurfaceMeshEntry*>(entry.get())->dirty = false;
             }
-        } else {
-            if (entry->gpuBuffer.HasGeometry()) {
-                entry->gpuBuffer.DrawIndexed(cmd);
+            if (drawWireframe) {
+                if (entry->gpuBuffer.HasEdges()) entry->gpuBuffer.DrawIndexedEdges(cmd);
+            } else {
+                if (entry->gpuBuffer.HasGeometry()) entry->gpuBuffer.DrawIndexed(cmd);
+            }
+        }
+    } else {
+        for (const auto& entry : meshes_) {
+            if (entry->dirty && allocator_) {
+                const_cast<SurfaceMeshEntry*>(entry.get())->mesh.ComputeEdges();
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Shutdown();
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).Initialize(*allocator_);
+                const_cast<SurfaceGPUBuffer&>(entry->gpuBuffer).UploadMesh(entry->mesh);
+                const_cast<SurfaceMeshEntry*>(entry.get())->dirty = false;
+            }
+            if (drawWireframe) {
+                if (entry->gpuBuffer.HasEdges()) entry->gpuBuffer.DrawIndexedEdges(cmd);
+            } else {
+                if (entry->gpuBuffer.HasGeometry()) entry->gpuBuffer.DrawIndexed(cmd);
             }
         }
     }

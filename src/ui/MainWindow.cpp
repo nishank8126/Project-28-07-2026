@@ -5,6 +5,8 @@
 #include "workstation/ui/ToolSettingsWidget.h"
 #include "workstation/cad/AttachmentManager.h"
 #include "workstation/cad/AttachmentDialogs.h"
+#include "workstation/ui/ClassificationTableWidget.h"
+#include "workstation/display/DisplayModeManager.h"
 #include "workstation/scene/SceneManager.h"
 
 #include <QMenuBar>
@@ -151,6 +153,9 @@ void MainWindow::buildMenu() {
 
     QAction* shadingAct = toolsMenu->addAction("&Shading Display...");
     connect(shadingAct, &QAction::triggered, this, &MainWindow::onShadingDisplay);
+
+    QAction* loadPtcAct = toolsMenu->addAction("Load &Classification PTC...");
+    connect(loadPtcAct, &QAction::triggered, this, &MainWindow::onLoadClassificationPtc);
 
     QMenu* surfaceMenu = toolsMenu->addMenu("&Surface Reconstruction");
     QAction* genSurfaceAct = surfaceMenu->addAction("&Generate Surface");
@@ -680,6 +685,48 @@ void MainWindow::onShadingDisplay() {
             .arg(dlg->qualityLevel()));
     });
     dlg->show();
+}
+
+void MainWindow::onLoadClassificationPtc() {
+    QString path = QFileDialog::getOpenFileName(
+        this, "Load Classification PTC", QString(),
+        "PTC Files (*.ptc);;All Files (*)");
+    if (path.isEmpty()) return;
+
+    // Load into the renderer.
+    QString error;
+    m_viewport->LoadClassificationPTC(path, &error);
+    if (!error.isEmpty()) {
+        QMessageBox::warning(this, "PTC Load Failed", error);
+        m_toolSettings->appendLog(QString("Failed to load PTC: %1").arg(error));
+        return;
+    }
+
+    // Parse the PTC into a palette for the table.
+    display::ClassPalette palette;
+    std::string stdError;
+    if (!display::PtcFileReader::load(path.toStdString(), palette, &stdError)) {
+        QMessageBox::warning(this, "PTC Parse Error",
+                             QString::fromStdString(stdError));
+        return;
+    }
+
+    // Show the classification table.
+    auto* table = new ClassificationTableWidget(palette, m_viewport, this);
+    table->setAttribute(Qt::WA_DeleteOnClose);
+    connect(table, &ClassificationTableWidget::classificationVisibilityChanged,
+            this, [this](int code, bool vis) {
+        m_toolSettings->appendLog(
+            QString("Class %1 visibility: %2").arg(code).arg(vis ? "ON" : "OFF"));
+    });
+    table->show();
+
+    m_toolSettings->appendLog(
+        QString("Loaded PTC classification: %1 (%2 classes)")
+            .arg(QFileInfo(path).fileName()).arg(palette.size()));
+    statusBar()->showMessage(
+        QString("PTC loaded: %1 (%2 classes)")
+            .arg(QFileInfo(path).fileName()).arg(palette.size()), 5000);
 }
 
 } // namespace ui

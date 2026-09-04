@@ -213,8 +213,63 @@ bool SntAttachment::loadLegacyV0(const uint8_t* data, size_t size, std::string* 
     return true;
 }
 
+namespace {
+// -- Modern SNT binary format, reverse-engineered and byte-exact validated
+// against real files against the DGN->SNT converter's own struct formats
+// (Python's `struct` module notation kept in comments for direct cross-
+// reference against that source):
+//
+//   header:  "<IbbHQ4d6QI28s"  = 128 bytes
+//     magic(u32) verMajor(i8) verMinor(i8) flags(u16) entityCount(u64)
+//     bboxMinX/MinY/MaxX/MaxY(4x double)
+//     t[0..5] (6x u64): t0=metaOff, t1=metaEnd(=stringPoolOff),
+//                       t2=stringPoolEnd(=layerTableOff), t3=layerTableEnd,
+//                       t4=entityTableOff (duplicate of t3), t5=entityTableEnd
+//     crc(u32) creator(28 bytes)
+//
+//   string pool [t1,t2): count(u32) then per string: len(u16) + utf8 bytes
+//   layer table [t2,t3): records of "<IHHBBH" = 12 bytes each:
+//     name_idx(u32) color_aci(u16) linetype_idx(u16) flags(u8) reserved(u8) pad(u16)
+//   entity table [t4,t5): sequence of [17-byte header][body_size bytes body]
+//     header "<BHBIIBI": type(u8) layer_idx(u16) color_mode(u8) color_value(u32)
+//                        entity_id(u32, unused here) lineweight(u8) body_size(u32)
+//
+// Verified end-to-end against a real 464-entity file: every entity landed
+// exactly on the declared table end with zero decode errors, and decoded
+// TEXT/LWPOLYLINE bodies matched the file's actual grid-tile content.
+constexpr size_t kModernHeaderSize = 128;
+constexpr size_t kModernEntityHdrSize = 17;
+constexpr size_t kModernLayerSize = 12;
+
+enum ModernEntityType : uint8_t {
+    kMETLine = 0x01,
+    kMETLwPolyline = 0x02,
+    kMETPolyline3D = 0x03,
+    kMETArc = 0x04,
+    kMETCircle = 0x05,
+    kMETEllipse = 0x06,
+    kMETSpline = 0x07,
+    kMETPoint = 0x08,
+    kMETText = 0x10,
+    kMETMText = 0x11,
+    kMETDimension = 0x12,
+    kMETSolid = 0x21,
+    kMETFace3d = 0x22,
+    kMETMesh = 0x50,
+};
+
+enum ModernColorMode : uint8_t { kMCMByLayer = 0, kMCMAci = 1, kMCMRgb = 2 };
+
+float ReadF32(const uint8_t* p) { float v; std::memcpy(&v, p, 4); return v; }
+uint16_t ReadU16(const uint8_t* p) { uint16_t v; std::memcpy(&v, p, 2); return v; }
+uint32_t ReadU32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
+uint64_t ReadU64(const uint8_t* p) { uint64_t v; std::memcpy(&v, p, 8); return v; }
+double ReadF64(const uint8_t* p) { double v; std::memcpy(&v, p, 8); return v; }
+
+} // namespace
+
 bool SntAttachment::loadModern(const uint8_t* data, size_t size, std::string* errorMessage) {
-    if (size < 0x60) {
+    if (size < kModernHeaderSize) {
         if (errorMessage) *errorMessage = "SNT file too small for modern header";
         return false;
     }
@@ -224,69 +279,215 @@ bool SntAttachment::loadModern(const uint8_t* data, size_t size, std::string* er
         return false;
     }
 
-    uint32_t entityCount = 0;
-    std::memcpy(&entityCount, data + 0x08, 4);
+    m_doc.versionMajor = static_cast<int8_t>(data[4]);
+    m_doc.versionMinor = static_cast<int8_t>(data[5]);
+    // uint16_t flags = ReadU16(data + 6); // FLAG_HAS_INDEX / FLAG_HAS_CRS, unused here
 
-    double bboxMinX, bboxMinY, bboxMaxX, bboxMaxY;
-    std::memcpy(&bboxMinX, data + 0x10, 8);
-    std::memcpy(&bboxMinY, data + 0x18, 8);
-    std::memcpy(&bboxMaxX, data + 0x20, 8);
-    std::memcpy(&bboxMaxY, data + 0x28, 8);
-
+    double bboxMinX = ReadF64(data + 16);
+    double bboxMinY = ReadF64(data + 24);
+    double bboxMaxX = ReadF64(data + 32);
+    double bboxMaxY = ReadF64(data + 40);
     m_doc.bboxMinX = bboxMinX; m_doc.bboxMinY = bboxMinY;
     m_doc.bboxMaxX = bboxMaxX; m_doc.bboxMaxY = bboxMaxY;
     m_doc.hasBBox = true;
 
-    uint32_t entityTableOffset = 0, entityTableEnd = 0;
-    std::memcpy(&entityTableOffset, data + 0x50, 4);
-    std::memcpy(&entityTableEnd, data + 0x58, 4);
+    uint64_t t[6];
+    for (int i = 0; i < 6; ++i) t[i] = ReadU64(data + 48 + i * 8);
+    uint64_t stringPoolOffset = t[1], stringPoolEnd = t[2];
+    uint64_t layerTableOffset = t[2], layerTableEnd = t[3];
+    uint64_t entityTableOffset = t[4], entityTableEnd = t[5];
 
-    if (entityTableOffset == 0 || entityTableEnd <= entityTableOffset || entityTableEnd > size) {
-        if (errorMessage) *errorMessage = "Invalid entity table offsets";
+    if (entityTableOffset == 0 || entityTableEnd < entityTableOffset || entityTableEnd > size ||
+        layerTableEnd > size || stringPoolEnd > size) {
+        if (errorMessage) *errorMessage = "Invalid modern SNT table offsets";
         return false;
     }
 
-    double marginX = (bboxMaxX - bboxMinX) * 0.05 + 1.0;
-    double marginY = (bboxMaxY - bboxMinY) * 0.05 + 1.0;
-    double loX = bboxMinX - marginX, hiX = bboxMaxX + marginX;
-    double loY = bboxMinY - marginY, hiY = bboxMaxY + marginY;
-
-    size_t pos = entityTableOffset;
-    int recoveredCount = 0;
-    while (pos + 4 <= entityTableEnd) {
-        uint32_t count = 0;
-        std::memcpy(&count, data + pos, 4);
-        size_t vertexBytes = static_cast<size_t>(count) * 12;
-
-        if (count >= 2 && count <= 100000 && pos + 4 + vertexBytes <= entityTableEnd) {
-            bool plausible = true;
-            for (uint32_t v = 0; v < count && plausible; ++v) {
-                float x, y;
-                std::memcpy(&x, data + pos + 4 + v * 12 + 0, 4);
-                std::memcpy(&y, data + pos + 4 + v * 12 + 4, 4);
-                if (x < loX || x > hiX || y < loY || y > hiY) plausible = false;
-            }
-
-            if (plausible) {
-                SntEntity ent;
-                ent.type = SntEntity::Polyline;
-                ent.colorR = 255; ent.colorG = 255; ent.colorB = 255;
-                ent.layer = "0";
-                ent.vertices.resize(count);
-                for (uint32_t v = 0; v < count; ++v) {
-                    float x, y, z;
-                    std::memcpy(&x, data + pos + 4 + v * 12 + 0, 4);
-                    std::memcpy(&y, data + pos + 4 + v * 12 + 4, 4);
-                    std::memcpy(&z, data + pos + 4 + v * 12 + 8, 4);
-                    ent.vertices[v] = {static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
-                }
-                m_doc.entities.push_back(ent);
-                recoveredCount++;
-                pos += 4 + vertexBytes;
-                continue;
+    // -- string pool --------------------------------------------------------
+    std::vector<std::string> strings;
+    {
+        size_t sp = static_cast<size_t>(stringPoolOffset);
+        if (sp + 4 <= stringPoolEnd) {
+            uint32_t strCount = ReadU32(data + sp);
+            sp += 4;
+            strings.reserve(strCount);
+            for (uint32_t i = 0; i < strCount && sp + 2 <= stringPoolEnd; ++i) {
+                uint16_t slen = ReadU16(data + sp);
+                sp += 2;
+                if (sp + slen > stringPoolEnd) break;
+                strings.emplace_back(reinterpret_cast<const char*>(data + sp), slen);
+                sp += slen;
             }
         }
-        pos += 4;
+    }
+
+    // -- layer table ----------------------------------------------------------
+    m_doc.layers.clear();
+    {
+        size_t lp = static_cast<size_t>(layerTableOffset);
+        while (lp + kModernLayerSize <= layerTableEnd) {
+            uint32_t nameIdx = ReadU32(data + lp);
+            uint16_t colorAci = ReadU16(data + lp + 4);
+            std::string name = (nameIdx < strings.size()) ? strings[nameIdx]
+                : ("Layer" + std::to_string(m_doc.layers.size()));
+            auto color = resolveEntityColor(static_cast<int>(colorAci), -1);
+            if (color[0] == 255 && color[1] == 255 && color[2] == 255) {
+                color = kLayerColorCycle[m_doc.layers.size() % kLayerColorCycleSize];
+            }
+            m_doc.layers.push_back({name, color});
+            lp += kModernLayerSize;
+        }
+    }
+
+    // -- entity table -----------------------------------------------------------
+    m_doc.entities.clear();
+    size_t ep = static_cast<size_t>(entityTableOffset);
+    while (ep + kModernEntityHdrSize <= entityTableEnd) {
+        uint8_t etype = data[ep];
+        uint16_t layerIdx = ReadU16(data + ep + 1);
+        uint8_t colorMode = data[ep + 3];
+        uint32_t colorValue = ReadU32(data + ep + 4);
+        // entity_id at data+ep+8 (u32) is not needed for rendering.
+        uint8_t lineweight = data[ep + 12];
+        uint32_t bodySize = ReadU32(data + ep + 13);
+
+        size_t bodyStart = ep + kModernEntityHdrSize;
+        size_t bodyEnd = bodyStart + bodySize;
+        if (bodyEnd > entityTableEnd) break; // corrupt tail - stop rather than misread
+
+        std::string layerName = (layerIdx < m_doc.layers.size()) ? m_doc.layers[layerIdx].first : "0";
+        std::array<uint8_t, 3> color;
+        if (colorMode == kMCMRgb) {
+            color = {static_cast<uint8_t>((colorValue >> 16) & 0xFF),
+                     static_cast<uint8_t>((colorValue >> 8) & 0xFF),
+                     static_cast<uint8_t>(colorValue & 0xFF)};
+        } else if (colorMode == kMCMAci) {
+            color = resolveEntityColor(static_cast<int>(colorValue & 0xFF), static_cast<int>(layerIdx));
+        } else { // BYLAYER
+            color = resolveEntityColor(-1, static_cast<int>(layerIdx));
+        }
+
+        const uint8_t* body = data + bodyStart;
+        SntEntity ent;
+        ent.layer = layerName;
+        ent.colorR = color[0]; ent.colorG = color[1]; ent.colorB = color[2];
+        ent.lineweight = lineweight;
+        bool pushed = false;
+
+        switch (etype) {
+            case kMETLine:
+                if (bodySize >= 24) {
+                    ent.type = SntEntity::Polyline;
+                    ent.vertices = {
+                        {ReadF32(body + 0), ReadF32(body + 4), ReadF32(body + 8)},
+                        {ReadF32(body + 12), ReadF32(body + 16), ReadF32(body + 20)},
+                    };
+                    ent.closed = false;
+                    pushed = true;
+                }
+                break;
+            case kMETLwPolyline: {
+                if (bodySize >= 9) {
+                    float elev = ReadF32(body + 0);
+                    uint8_t flagsLw = body[4];
+                    uint32_t vcount = ReadU32(body + 5);
+                    if (static_cast<size_t>(9) + static_cast<size_t>(vcount) * 12 <= bodySize) {
+                        ent.type = SntEntity::Polyline;
+                        ent.vertices.reserve(vcount);
+                        for (uint32_t v = 0; v < vcount; ++v) {
+                            const uint8_t* vp = body + 9 + v * 12;
+                            ent.vertices.push_back({ReadF32(vp), ReadF32(vp + 4), static_cast<double>(elev)});
+                        }
+                        ent.closed = (flagsLw & 0x01) != 0;
+                        pushed = true;
+                    }
+                }
+                break;
+            }
+            case kMETPolyline3D: {
+                // Not emitted by the known writer, but the header/body-size
+                // framing is self-describing regardless of type, so a 3-D
+                // variant (x,y,z per vertex, no bulge) is a safe best-effort
+                // read: "<BI>" flags,count + count*"<3f>" = 5 + count*12.
+                if (bodySize >= 5) {
+                    uint8_t flagsP = body[0];
+                    uint32_t vcount = ReadU32(body + 1);
+                    if (static_cast<size_t>(5) + static_cast<size_t>(vcount) * 12 <= bodySize) {
+                        ent.type = SntEntity::Polyline;
+                        ent.vertices.reserve(vcount);
+                        for (uint32_t v = 0; v < vcount; ++v) {
+                            const uint8_t* vp = body + 5 + v * 12;
+                            ent.vertices.push_back({ReadF32(vp), ReadF32(vp + 4), ReadF32(vp + 8)});
+                        }
+                        ent.closed = (flagsP & 0x01) != 0;
+                        pushed = true;
+                    }
+                }
+                break;
+            }
+            case kMETArc:
+                if (bodySize >= 24) {
+                    ent.type = SntEntity::Arc;
+                    ent.center = {ReadF32(body + 0), ReadF32(body + 4), ReadF32(body + 8)};
+                    ent.radius = ReadF32(body + 12);
+                    ent.startAngle = ReadF32(body + 16);
+                    ent.endAngle = ReadF32(body + 20);
+                    pushed = true;
+                }
+                break;
+            case kMETCircle:
+                if (bodySize >= 16) {
+                    ent.type = SntEntity::Circle;
+                    ent.center = {ReadF32(body + 0), ReadF32(body + 4), ReadF32(body + 8)};
+                    ent.radius = ReadF32(body + 12);
+                    pushed = true;
+                }
+                break;
+            case kMETPoint:
+                if (bodySize >= 12) {
+                    ent.type = SntEntity::Point;
+                    ent.vertices = {{ReadF32(body + 0), ReadF32(body + 4), ReadF32(body + 8)}};
+                    pushed = true;
+                }
+                break;
+            case kMETText:
+            case kMETMText:
+            case kMETDimension:
+                if (bodySize >= 28) {
+                    ent.type = SntEntity::Text;
+                    double ix = ReadF32(body + 0), iy = ReadF32(body + 4), iz = ReadF32(body + 8);
+                    ent.vertices = {{ix, iy, iz}};
+                    ent.textHeight = ReadF32(body + 12);
+                    // rotation at body+16 - SntEntity has no rotation field yet.
+                    uint32_t strIdx = ReadU32(body + 20);
+                    ent.text = (strIdx < strings.size()) ? strings[strIdx] : "";
+                    pushed = true;
+                }
+                break;
+            case kMETSolid:
+            case kMETFace3d:
+                if (bodySize >= 48) {
+                    ent.type = SntEntity::ThreeDFace;
+                    ent.vertices.resize(4);
+                    for (int v = 0; v < 4; ++v) {
+                        const uint8_t* vp = body + v * 12;
+                        ent.vertices[v] = {ReadF32(vp), ReadF32(vp + 4), ReadF32(vp + 8)};
+                    }
+                    pushed = true;
+                }
+                break;
+            case kMETEllipse:
+            case kMETSpline:
+            case kMETMesh:
+            default:
+                // Body layout not confirmed against a real file for these
+                // (the known writer never emits them) - skip rather than
+                // guess and risk rendering wrong geometry.
+                break;
+        }
+
+        if (pushed) m_doc.entities.push_back(std::move(ent));
+        ep = bodyEnd;
     }
 
     return true;

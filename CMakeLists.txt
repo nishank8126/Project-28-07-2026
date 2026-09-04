@@ -194,6 +194,7 @@ add_library(workstation
     src/tools/SectionTool.cpp
     src/tools/CrossSectionTool.cpp
     src/tools/ClassificationTool.cpp
+    src/tools/ClassificationAlgorithms.cpp
     src/tools/CadDrawTools.cpp
     # CAD attachment system (DXF/DWG/SNT/Shading)
     src/cad/AciColorTable.cpp
@@ -231,6 +232,7 @@ add_library(workstation
     src/surface/SurfaceGPUBuffer.cpp
     src/surface/SurfaceRenderer.cpp
     src/surface/SurfaceMeshCache.cpp
+    src/surface/SurfaceLODManager.cpp
     src/scene/SurfaceSceneObject.cpp
 )
 
@@ -274,12 +276,13 @@ add_executable(wk_gui
     app/gui_main.cpp
     src/ui/MainWindow.cpp src/ui/ViewportWidget.cpp src/ui/ModelTreeWidget.cpp
     src/ui/PropertiesWidget.cpp src/ui/ToolSettingsWidget.cpp
-    src/ui/DisplayModeDialog.cpp
+    src/ui/DisplayModeDialog.cpp src/ui/ClassificationTableWidget.cpp
     src/cad/AttachmentDialogs.cpp
     include/workstation/ui/MainWindow.h include/workstation/ui/ViewportWidget.h
     include/workstation/ui/ModelTreeWidget.h include/workstation/ui/PropertiesWidget.h
     include/workstation/ui/ToolSettingsWidget.h
     include/workstation/ui/DisplayModeDialog.h
+    include/workstation/ui/ClassificationTableWidget.h
     include/workstation/cad/AttachmentDialogs.h
     include/workstation/display/DisplayModeManager.h
 )

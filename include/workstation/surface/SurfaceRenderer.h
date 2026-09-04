@@ -7,6 +7,7 @@
 #include "workstation/surface/SurfaceMesh.h"
 #include "workstation/surface/SurfaceGPUBuffer.h"
 #include "workstation/surface/SurfaceMeshGenerator.h"
+#include "workstation/surface/SurfaceLODManager.h"
 #include "workstation/renderer/Camera.h"
 #include "workstation/spatial/BoundingBox.h"
 
@@ -35,7 +36,8 @@ enum class ShadingType {
     DepthShading = 1,
     SurfaceShading = 2,
     EyeDomeLighting = 3,
-    Unlit = 4
+    SurfaceDebug = 4,
+    Unlit = 5
 };
 
 struct SurfaceRenderParams {
@@ -93,6 +95,11 @@ public:
     void GenerateSurfaceFromCloud(pointcloud::PointCloud& cloud,
                                    const SurfaceGenerationParams& params = {});
 
+    void GenerateLODs(pointcloud::PointCloud& cloud,
+                      const SurfaceGenerationParams& params = {});
+    const SurfaceLODManager& GetLODManager() const { return lodManager_; }
+    SurfaceLODManager& GetLODManager() { return lodManager_; }
+
     void Render(VkCommandBuffer cmd, const renderer::Camera& camera,
                 const SurfaceRenderParams& params = {});
 
@@ -143,6 +150,7 @@ private:
     bool visible_ = true;
     SurfaceRenderParams params_;
     SurfaceMeshGenerator meshGenerator_;
+    SurfaceLODManager lodManager_;
     SurfaceGenerationStats lastGenStats_;
     // Render decision log de-duplication: only state *changes* are written
     // to the surface log, so per-frame calls stay silent.

@@ -487,7 +487,7 @@ void ViewportWindow::GenerateSurfaceForCloud() {
     surface::SurfaceGenerationParams params = m_surfaceGenParams;
     params.computeNormals = true;
 
-    sr->GenerateSurfaceFromCloud(*m_cloud, params);
+    sr->GenerateLODs(*m_cloud, params);
     surfaceVisible_ = true;
     sr->SetVisible(true);
 }
@@ -578,6 +578,29 @@ void ViewportWindow::ToggleSurface() {
 surface::SurfaceRenderer* ViewportWindow::GetSurfaceRenderer() {
     if (!m_renderer) return nullptr;
     return &m_renderer->GetSurfaceRenderer();
+}
+
+void ViewportWindow::LoadClassificationPTC(const QString& path, QString* error) {
+    if (!m_renderer) {
+        if (error) *error = "Renderer not initialized";
+        return;
+    }
+    std::string stdError;
+    m_renderer->LoadClassificationPTC(path.toStdString(), &stdError);
+    if (!stdError.empty()) {
+        if (error) *error = QString::fromStdString(stdError);
+        return;
+    }
+    // Auto-switch to Classification visualization mode so the loaded palette is visible.
+    SetVisualizationMode(2);
+}
+
+void ViewportWindow::ClearCustomClassificationPalette() {
+    if (m_renderer) m_renderer->ClearCustomClassificationPalette();
+}
+
+void ViewportWindow::UpdateClassificationVisibility(int classCode, bool visible) {
+    if (m_renderer) m_renderer->UpdateClassificationVisibility(classCode, visible);
 }
 
 } // namespace ui

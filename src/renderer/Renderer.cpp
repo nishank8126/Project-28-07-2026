@@ -37,7 +37,6 @@ struct PointPushConstants {
     float intensityMax;         //  4 bytes
     float elevationMin;         //  4 bytes
     float elevationMax;         //  4 bytes
-    // -- new fields for Depth/Surface/EDL modes --
     float depthMin;             //  4 bytes
     float depthMax;             //  4 bytes
     float surfaceAmbient;       //  4 bytes
@@ -45,7 +44,7 @@ struct PointPushConstants {
     float surfaceSpecular;      //  4 bytes
     float surfaceShininess;     //  4 bytes
     float edlStrength;          //  4 bytes
-    float _pad0;                //  4 bytes (alignment / future use)
+    uint32_t hasCustomPalette;  //  4 bytes (1 = use SSBO classification colors)
 };                              // Total: 156 bytes
 static_assert(sizeof(PointPushConstants) == 156,
     "PointPushConstants must be exactly 156 bytes to match GLSL shaders");
@@ -165,6 +164,9 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
 
     adapter_.Initialize();
     toolManager_.Initialize();
+    if (auto* classificationTool = toolManager_.GetClassificationTool()) {
+        classificationTool->SetRefreshCallback([this]() { RefreshClassification(); });
+    }
     visualizationManager_.Initialize();
     debugRenderer_.Initialize();
 
@@ -387,6 +389,10 @@ void Renderer::RenderFrame() {
             // Debug mode: bypass visibility/LOD, draw all prepared geometry directly
             VkPipeline activePipeline = useDebug ? debugPipeline_ : pointPipeline_;
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
+            if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
+            }
             UpdatePushConstants(cmd);
 
             for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
@@ -409,11 +415,19 @@ void Renderer::RenderFrame() {
 
             if (!selectedNodeKeys_.empty()) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
+                }
                 UpdatePushConstants(cmd);
 
                 DrawResidentNodes(cmd);
             } else if (!visibleNodeKeys_.empty()) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
+                }
                 UpdatePushConstants(cmd);
 
                 DrawVisibleNodes(cmd);
@@ -436,6 +450,10 @@ void Renderer::RenderFrame() {
                                      visDebugStats_.totalNodes, visDebugStats_.visibleNodes);
                 }
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
+                if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                        pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
+                }
                 UpdatePushConstants(cmd);
 
                 for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
@@ -501,6 +519,62 @@ void Renderer::EndFrame() {
 
     vkCmdEndRenderPass(cmd);
 
+    // ONE-TIME DEBUG PIXEL CAPTURE: dumps the actual rendered BGRA bytes at
+    // the viewport center to stderr once, ~1s after a cloud is loaded, so we
+    // can see the true post-blend framebuffer content directly instead of
+    // relying on a screenshot description. Remove once the black-render bug
+    // is diagnosed.
+    static bool debugPixelCaptured = false;
+    bool captureThisFrame = false;
+    vulkan::GPUBuffer debugStagingBuffer;
+    VkExtent2D debugExtent{};
+    // Wait 90 frames (~1.5s) after the cloud is actually set before sampling,
+    // so geometry upload/visibility/LOD have had time to settle - the first
+    // capture attempt fired on the very same frame SetPointCloud() was
+    // called and only ever saw the raw clear color (nothing drawn yet).
+    if (!debugPixelCaptured && activeCloud_ && frameNumber_ > cloudLoadedAtFrame_ + 90) {
+        captureThisFrame = true;
+        debugPixelCaptured = true;
+
+        VkExtent2D ext = swapchain_->GetExtent();
+        debugExtent = ext;
+        VkDeviceSize bufSize = static_cast<VkDeviceSize>(ext.width) * ext.height * 4;
+        debugStagingBuffer = vulkan::VulkanAllocator::Get().CreateBuffer(
+            bufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
+
+        VkImage img = swapchain_->GetImage(frame.imageIndex);
+        VkImageMemoryBarrier toSrc{};
+        toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toSrc.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.image = img;
+        toSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        toSrc.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+        // Copy the ENTIRE frame this time (not just the center) so we can't
+        // miss the shape regardless of where on screen it actually sits.
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {ext.width, ext.height, 1};
+        vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                debugStagingBuffer.buffer, 1, &region);
+
+        VkImageMemoryBarrier backToPresent = toSrc;
+        backToPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        backToPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        backToPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        backToPresent.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &backToPresent);
+    }
+
     if (useImGui_ && imguiOverlay_) {
         imguiOverlay_->EndFrame();
     }
@@ -519,6 +593,30 @@ void Renderer::EndFrame() {
     submitInfo.pSignalSemaphores = &frame.renderFinished;
 
     vkQueueSubmit(device_->GetGraphicsQueue(), 1, &submitInfo, frame.inFlightFence);
+
+    if (captureThisFrame) {
+        vkDeviceWaitIdle(device_->GetDevice());
+        if (debugStagingBuffer.mappedData) {
+            auto* px = static_cast<uint8_t*>(debugStagingBuffer.mappedData);
+            fprintf(stderr, "[Renderer] DEBUG PIXEL CAPTURE: full frame %ux%u, format=%d, 12x12 grid sample (R,G,B,A):\n",
+                    debugExtent.width, debugExtent.height, static_cast<int>(swapchain_->GetImageFormat()));
+            constexpr int kGrid = 12;
+            for (int gy = 0; gy < kGrid; ++gy) {
+                uint32_t y = (debugExtent.height * (gy * 2 + 1)) / (kGrid * 2);
+                fprintf(stderr, "  y=%4u: ", y);
+                for (int gx = 0; gx < kGrid; ++gx) {
+                    uint32_t x = (debugExtent.width * (gx * 2 + 1)) / (kGrid * 2);
+                    uint8_t* p = px + (static_cast<size_t>(y) * debugExtent.width + x) * 4;
+                    // Swapchain format is B8G8R8A8 - print as R,G,B,A for readability.
+                    fprintf(stderr, "(%3u,%3u,%3u,%3u) ", p[2], p[1], p[0], p[3]);
+                }
+                fprintf(stderr, "\n");
+            }
+        } else {
+            fprintf(stderr, "[Renderer] DEBUG PIXEL CAPTURE: staging buffer not mapped!\n");
+        }
+        vulkan::VulkanAllocator::Get().DestroyBuffer(debugStagingBuffer);
+    }
 
     VkResult result = swapchain_->Present(frame.renderFinished, frame.imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
@@ -542,6 +640,10 @@ void Renderer::EndFrame() {
 
 void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
     activeCloud_ = cloud;
+    cloudLoadedAtFrame_ = frameNumber_;
+    if (auto* classificationTool = toolManager_.GetClassificationTool()) {
+        classificationTool->SetTargetCloud(cloud);
+    }
     if (cloud) {
         auto* prepGeo = adapter_.PreparePointCloud(*cloud);
         auto* root = cloud->Root();
@@ -590,6 +692,31 @@ void Renderer::RefreshNormals() {
 
     geo->UploadNormal(reinterpret_cast<const float*>(ch->Data()),
                        static_cast<uint32_t>(ch->Count()));
+}
+
+void Renderer::RefreshClassification() {
+    if (!activeCloud_) return;
+    auto* root = activeCloud_->Root();
+    if (!root) return;
+
+    auto* ch = root->channels().GetChannel(pointcloud::ChannelId::Classification);
+    if (!ch || !ch->Data()) return;
+
+    size_t count = ch->Count();
+    // GPU classification attribute is float (see point.vert's inClassification
+    // and PointCloudRenderAdapter's initial upload) - the CPU channel itself
+    // stays 1 byte/point, so convert on the way up same as the initial build.
+    std::vector<float> classifications(count);
+    const uint8_t* data = ch->Data();
+    for (size_t i = 0; i < count; ++i) {
+        classifications[i] = static_cast<float>(data[i]);
+    }
+
+    auto* geo = adapter_.GetPreparedGeometry(0);
+    if (!geo) return;
+
+    geo->UploadClassification(classifications.data(), static_cast<uint32_t>(count));
+    geo->IncrementRevision();
 }
 
 void Renderer::SetVectorOverlay(const pointcloud::SntEntities& entities) {
@@ -709,6 +836,102 @@ void Renderer::DrawSurface(VkCommandBuffer cmd) {
     params.lightDirZ = cfg.surfaceLightDirZ;
 
     surfaceRenderer_.Render(cmd, cam, params);
+}
+
+void Renderer::LoadClassificationPTC(const std::string& filepath, std::string* error) {
+    display::ClassPalette palette;
+    if (!display::PtcFileReader::load(filepath, palette, error)) {
+        fprintf(stderr, "[Renderer] LoadClassificationPTC: FAILED - %s\n",
+                error ? error->c_str() : "unknown");
+        return;
+    }
+    SetCustomClassificationPalette(palette);
+    fprintf(stderr, "[Renderer] LoadClassificationPTC: loaded %zu classes from %s\n",
+            palette.size(), filepath.c_str());
+}
+
+void Renderer::SetCustomClassificationPalette(const display::ClassPalette& palette) {
+    customPalette_ = palette;
+    hasCustomPalette_ = true;
+
+    fprintf(stderr, "[Renderer] SetCustomClassificationPalette: buffer valid=%d, mapped=%p\n",
+            classificationBuffer_.IsValid(), classificationBuffer_.mappedData);
+
+    if (!classificationBuffer_.IsValid() || !classificationBuffer_.mappedData) return;
+
+    constexpr uint32_t kMaxClasses = 256;
+    constexpr VkDeviceSize bufSize = kMaxClasses * sizeof(float) * 4;
+    float colors[kMaxClasses * 4];
+    memset(colors, 0, sizeof(colors));
+
+    for (uint32_t i = 0; i < kMaxClasses; ++i) {
+        colors[i * 4 + 3] = 1.0f;
+    }
+
+    for (const auto& [code, entry] : palette) {
+        if (code < 0 || code >= static_cast<int>(kMaxClasses)) continue;
+        colors[code * 4 + 0] = entry.normalizedR();
+        colors[code * 4 + 1] = entry.normalizedG();
+        colors[code * 4 + 2] = entry.normalizedB();
+        colors[code * 4 + 3] = entry.visible ? 1.0f : 0.0f;
+        fprintf(stderr, "  class %d: %s -> rgb=(%.3f,%.3f,%.3f) visible=%d\n",
+                code, entry.description.c_str(),
+                entry.normalizedR(), entry.normalizedG(), entry.normalizedB(), entry.visible);
+    }
+
+    memcpy(classificationBuffer_.mappedData, colors, bufSize);
+    classificationBuffer_.FlushMapped();
+    fprintf(stderr, "[Renderer] Custom palette: %zu classes, descriptor set valid=%d\n",
+            palette.size(), classificationDescriptorSet_ != VK_NULL_HANDLE);
+}
+
+void Renderer::ClearCustomClassificationPalette() {
+    hasCustomPalette_ = false;
+    customPalette_.clear();
+
+    // Reset to default ASPRS palette.
+    if (!classificationBuffer_.IsValid() || !classificationBuffer_.mappedData) return;
+
+    constexpr uint32_t kMaxClasses = 256;
+    constexpr VkDeviceSize bufSize = kMaxClasses * sizeof(float) * 4;
+    float defaults[kMaxClasses * 4];
+    memset(defaults, 0, sizeof(defaults));
+    for (uint32_t i = 0; i < kMaxClasses; ++i) {
+        defaults[i * 4 + 3] = 1.0f;
+    }
+    auto setCls = [&](int cls, float r, float g, float b) {
+        defaults[cls * 4 + 0] = r;
+        defaults[cls * 4 + 1] = g;
+        defaults[cls * 4 + 2] = b;
+    };
+    setCls(0,  0.50f, 0.50f, 0.50f); setCls(1,  0.00f, 1.00f, 0.00f);
+    setCls(2,  0.00f, 0.78f, 0.00f); setCls(3,  0.00f, 0.60f, 0.00f);
+    setCls(4,  0.00f, 0.42f, 0.00f); setCls(5,  0.00f, 0.25f, 0.00f);
+    setCls(6,  1.00f, 0.00f, 0.00f); setCls(7,  1.00f, 0.50f, 0.00f);
+    setCls(8,  1.00f, 1.00f, 0.00f); setCls(9,  0.50f, 0.00f, 0.50f);
+    setCls(10, 0.75f, 0.75f, 0.75f); setCls(11, 0.80f, 0.80f, 0.00f);
+    setCls(12, 0.60f, 0.60f, 0.00f); setCls(13, 0.40f, 0.40f, 0.00f);
+    setCls(14, 0.20f, 0.20f, 0.00f); setCls(15, 0.60f, 0.30f, 0.00f);
+    setCls(16, 0.00f, 0.00f, 1.00f); setCls(17, 0.50f, 0.50f, 1.00f);
+
+    memcpy(classificationBuffer_.mappedData, defaults, bufSize);
+    classificationBuffer_.FlushMapped();
+}
+
+void Renderer::UpdateClassificationVisibility(int classCode, bool visible) {
+    if (classCode < 0 || classCode >= 256) return;
+
+    auto it = customPalette_.find(classCode);
+    if (it != customPalette_.end()) {
+        it->second.visible = visible;
+    }
+
+    if (!classificationBuffer_.IsValid() || !classificationBuffer_.mappedData) return;
+
+    // Update just the alpha of the affected class.
+    float* colors = static_cast<float*>(classificationBuffer_.mappedData);
+    colors[classCode * 4 + 3] = visible ? 1.0f : 0.0f;
+    classificationBuffer_.FlushMapped();
 }
 
 void Renderer::LoadDxfAttachment(cad::DxfAttachment* attachment) {
@@ -1014,7 +1237,13 @@ bool Renderer::CreatePointPipeline() {
         }
     }
 
-    VkDescriptorSetLayout layout = descriptorManager_->CreateLayout({});
+    // Descriptor layout: binding 0 = classification color storage buffer (256 RGBA vec4s).
+    // The shader reads from it only when visualizationMode == 15 (ClassificationPalette)
+    // or when hasCustomPalette is set via push constants.
+    VkDescriptorSetLayout layout = descriptorManager_->CreateLayout({
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT}
+    });
 
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -1035,6 +1264,48 @@ bool Renderer::CreatePointPipeline() {
 
     for (auto& shader : shaders) {
         shaderManager_->DestroyShaderModule(shader.module);
+    }
+
+    // Classification color storage buffer: 256 entries × 16 bytes (vec4 RGBA).
+    // Initialized to the default ASPRS palette; overridden by LoadClassificationPTC.
+    {
+        constexpr uint32_t kMaxClasses = 256;
+        constexpr VkDeviceSize bufSize = kMaxClasses * sizeof(float) * 4;
+        classificationBuffer_ = vulkan::VulkanAllocator::Get().CreateBuffer(
+            bufSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_ONLY,
+            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+            VMA_ALLOCATION_CREATE_MAPPED_BIT);
+
+        if (classificationBuffer_.IsValid() && classificationBuffer_.mappedData) {
+            // Fill with default ASPRS palette (from InitializeClassificationPalette).
+            float defaults[kMaxClasses * 4] = {};
+            auto setCls = [&](int cls, float r, float g, float b) {
+                defaults[cls * 4 + 0] = r;
+                defaults[cls * 4 + 1] = g;
+                defaults[cls * 4 + 2] = b;
+                defaults[cls * 4 + 3] = 1.0f;
+            };
+            setCls(0,  0.50f, 0.50f, 0.50f); setCls(1,  0.00f, 1.00f, 0.00f);
+            setCls(2,  0.00f, 0.78f, 0.00f); setCls(3,  0.00f, 0.60f, 0.00f);
+            setCls(4,  0.00f, 0.42f, 0.00f); setCls(5,  0.00f, 0.25f, 0.00f);
+            setCls(6,  1.00f, 0.00f, 0.00f); setCls(7,  1.00f, 0.50f, 0.00f);
+            setCls(8,  1.00f, 1.00f, 0.00f); setCls(9,  0.50f, 0.00f, 0.50f);
+            setCls(10, 0.75f, 0.75f, 0.75f); setCls(11, 0.80f, 0.80f, 0.00f);
+            setCls(12, 0.60f, 0.60f, 0.00f); setCls(13, 0.40f, 0.40f, 0.00f);
+            setCls(14, 0.20f, 0.20f, 0.00f); setCls(15, 0.60f, 0.30f, 0.00f);
+            setCls(16, 0.00f, 0.00f, 1.00f); setCls(17, 0.50f, 0.50f, 1.00f);
+            memcpy(classificationBuffer_.mappedData, defaults, bufSize);
+            classificationBuffer_.FlushMapped();
+        }
+
+        classificationDescriptorSet_ = descriptorManager_->AllocateSet(
+            pointDescriptorPool_, pointDescriptorLayout_);
+        descriptorManager_->UpdateBuffer(
+            classificationDescriptorSet_, 0,
+            classificationBuffer_.buffer, classificationBuffer_.size,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
     }
 
     return pointPipeline_ != VK_NULL_HANDLE;
@@ -1204,6 +1475,16 @@ bool Renderer::CreateCadLinePipeline() {
 }
 
 bool Renderer::CreateDescriptorResources() {
+    // Create a descriptor pool for the point pipeline's classification SSBO.
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSize.descriptorCount = 1;
+    pointDescriptorPool_ = descriptorManager_->CreatePool({poolSize}, 1);
+    if (pointDescriptorPool_ == VK_NULL_HANDLE) {
+        fprintf(stderr, "[Renderer] Failed to create point descriptor pool\n");
+        return false;
+    }
+    fprintf(stderr, "[Renderer] Point descriptor pool created OK\n");
     return true;
 }
 
@@ -1247,6 +1528,13 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.surfaceSpecular = cfg.surfaceSpecular;
     pc.surfaceShininess = cfg.surfaceShininess;
     pc.edlStrength = cfg.edlStrength;
+    pc.hasCustomPalette = hasCustomPalette_ ? 1u : 0u;
+
+    static int logCounter = 0;
+    if (logCounter++ < 5 || (logCounter % 120 == 0)) {
+        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u\n",
+                pc.visualizationMode, pc.hasCustomPalette);
+    }
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
                         VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

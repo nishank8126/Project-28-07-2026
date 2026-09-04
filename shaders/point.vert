@@ -24,7 +24,13 @@ layout(push_constant) uniform PushConstants {
     float surfaceSpecular;
     float surfaceShininess;
     float edlStrength;
-    float _pad0;
+    uint hasCustomPalette;
+};
+
+// Classification color storage buffer: 256 × vec4 (RGBA).
+// Alpha = 0 means the class is hidden.
+layout(std430, set = 0, binding = 0) readonly buffer ClassificationColors {
+    vec4 classificationColors[256];
 };
 
 struct VertexOutput {
@@ -132,9 +138,17 @@ void main() {
             visualColor = vec4(vec3(i), 1.0);
             break;
         }
-        case 2: // Classification (8-class)
-            visualColor = vec4(ClassifyColor(inClassification), 1.0);
+        case 2: // Classification (8-class) or custom PTC palette
+        {
+            if (hasCustomPalette == 1u) {
+                int cls = clamp(int(inClassification), 0, 255);
+                vec4 custom = classificationColors[cls];
+                visualColor = vec4(custom.rgb, custom.a);
+            } else {
+                visualColor = vec4(ClassifyColor(inClassification), 1.0);
+            }
             break;
+        }
         case 3: // Elevation
         {
             float h = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
@@ -201,9 +215,17 @@ void main() {
             visualColor = vec4(baseColor * depthFactor, 1.0);
             break;
         }
-        case 15: // Classification Palette (full 18-class ASPRS)
-            visualColor = vec4(ClassifyColorFull(inClassification), 1.0);
+        case 15: // Classification Palette (full 18-class ASPRS or custom PTC)
+        {
+            if (hasCustomPalette == 1u) {
+                int cls = clamp(int(inClassification), 0, 255);
+                vec4 custom = classificationColors[cls];
+                visualColor = vec4(custom.rgb, custom.a);
+            } else {
+                visualColor = vec4(ClassifyColorFull(inClassification), 1.0);
+            }
             break;
+        }
         default:
             visualColor = vec4(inColor, 1.0);
             break;

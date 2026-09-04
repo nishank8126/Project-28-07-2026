@@ -24,6 +24,7 @@ public:
     VkImageView GetImageView(uint32_t index) const { return imageViews_[index]; }
     VkImageView GetDepthImageView() const { return depthImageView_; }
     uint32_t GetImageCount() const { return static_cast<uint32_t>(images_.size()); }
+    VkImage GetImage(uint32_t index) const { return images_[index]; }
 
 private:
     VkDevice device_ = VK_NULL_HANDLE;

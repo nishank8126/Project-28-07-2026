@@ -7,8 +7,11 @@
 
 #include <laszip_api.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <memory>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace workstation {
@@ -110,7 +113,21 @@ bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string*
         }
 
         intensities[readCount] = point->intensity / 65535.0f;
-        classifications[readCount] = point->classification;
+        // Legacy point formats (0-5) only carry a 5-bit classification
+        // bitfield plus separate synthetic/keypoint/withheld flag bits, so
+        // reading point->classification alone truncates any code above 31
+        // (e.g. ASPRS 51 = noise) and drops those flags. LAS 1.4 extended
+        // formats (6-10) carry the full 8-bit code in extended_classification
+        // instead, selected by extended_point_type.
+        if (point->extended_point_type) {
+            classifications[readCount] = point->extended_classification;
+        } else {
+            classifications[readCount] = static_cast<uint8_t>(
+                point->classification |
+                (point->synthetic_flag << 5) |
+                (point->keypoint_flag << 6) |
+                (point->withheld_flag << 7));
+        }
 
         if (hasColor) {
             colors[readCount * 3 + 0] = point->rgb[0] / 65535.0f;
@@ -196,6 +213,26 @@ bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string*
             bounds.minX, bounds.minY, bounds.minZ, bounds.maxX, bounds.maxY, bounds.maxZ);
     fprintf(stderr, "[LasFileReader] First RGB: (%.3f, %.3f, %.3f)\n",
             colors[0], colors[1], colors[2]);
+
+    // Classification histogram: diagnostic for "PTC colors aren't showing"
+    // reports - lets us see at a glance whether this file's codes actually
+    // overlap the loaded palette's codes, or whether it's an unclassified
+    // scan (everything code 0/1) that just hasn't been run through whatever
+    // classification workflow the PTC's codes assume.
+    {
+        std::unordered_map<uint8_t, size_t> histogram;
+        for (size_t i = 0; i < readCount; ++i) histogram[classifications[i]]++;
+        std::vector<std::pair<uint8_t, size_t>> sorted(histogram.begin(), histogram.end());
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const auto& a, const auto& b) { return a.second > b.second; });
+        fprintf(stderr, "[LasFileReader] Classification codes present (%zu distinct): ",
+                sorted.size());
+        for (size_t i = 0; i < sorted.size() && i < 20; ++i) {
+            fprintf(stderr, "%u=%zu%s", sorted[i].first, sorted[i].second,
+                    (i + 1 < sorted.size() && i + 1 < 20) ? ", " : "");
+        }
+        fprintf(stderr, "\n");
+    }
     return true;
 }
 

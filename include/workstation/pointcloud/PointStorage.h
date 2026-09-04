@@ -23,6 +23,32 @@ public:
             if (c.Id() == id) return &c;
         return nullptr;
     }
+    PointAttributeChannel* GetChannelMutable(ChannelId id) {
+        for (auto& c : channels_)
+            if (c.Id() == id) return &c;
+        return nullptr;
+    }
+
+    // In-place classification edits (used by manual reclassification and the
+    // automated Ground/Low Points/Isolated Points tools). The Classification
+    // channel is always 1 byte/point (see PointAttributeChannel::Create), so
+    // this is a direct indexed byte write - no realloc/re-decode needed.
+    bool WriteClassification(size_t index, uint8_t value) {
+        auto* c = GetChannelMutable(ChannelId::Classification);
+        if (!c || index >= c->Count()) return false;
+        uint8_t* d = c->MutableData();
+        if (!d) return false;
+        d[index * c->Stride()] = value;
+        return true;
+    }
+    bool ReadClassification(size_t index, uint8_t& out) const {
+        const auto* c = GetChannel(ChannelId::Classification);
+        if (!c || index >= c->Count()) return false;
+        const uint8_t* d = c->Data();
+        if (!d) return false;
+        out = d[index * c->Stride()];
+        return true;
+    }
 
     // High-level decode using the stored XYZ / RGB channel.
     bool ReadXYZ(size_t index, double out[3]) const {

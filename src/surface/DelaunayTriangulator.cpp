@@ -1,6 +1,7 @@
 #include "workstation/surface/DelaunayTriangulator.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 #include <set>
 
@@ -210,6 +211,24 @@ SurfaceMesh DelaunayTriangulator::Triangulate(const std::vector<math::Point3d>& 
                             }),
             triangles.end());
     }
+
+    // Validate: reject degenerate (zero-area) triangles and out-of-bounds indices.
+    uint32_t vertexCount = static_cast<uint32_t>(points.size() - 3);
+    triangles.erase(
+        std::remove_if(triangles.begin(), triangles.end(),
+                        [this, &points, vertexCount](const Triangle& t) {
+                            for (int i = 0; i < 3; ++i) {
+                                if (t.v[i] >= vertexCount) return true;
+                            }
+                            const auto& p0 = points[t.v[0]];
+                            const auto& p1 = points[t.v[1]];
+                            const auto& p2 = points[t.v[2]];
+                            double ex1 = p1.x - p0.x, ey1 = p1.y - p0.y;
+                            double ex2 = p2.x - p0.x, ey2 = p2.y - p0.y;
+                            double area = std::abs(ex1 * ey2 - ey1 * ex2);
+                            return area < 1e-20;
+                        }),
+        triangles.end());
 
     mesh.Vertices().resize(points.size() - 3);
     for (size_t i = 0; i < points.size() - 3; ++i) {

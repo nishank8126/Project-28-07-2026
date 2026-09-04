@@ -60,7 +60,9 @@ bool VulkanSwapchain::Initialize(VkDevice device, VkPhysicalDevice physicalDevic
     createInfo.imageColorSpace = surfaceFormat.colorSpace;
     createInfo.imageExtent = extent_;
     createInfo.imageArrayLayers = 1;
-    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // TRANSFER_SRC added so a debug pixel-readback capture (Renderer::EndFrame)
+    // can copy the presented image out for diagnostics.
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
     uint32_t queueFamilyIndices[] = {
         static_cast<uint32_t>(indices_.graphicsFamily),

@@ -156,6 +156,17 @@ bool SurfaceGPUBuffer::UploadMesh(const SurfaceMesh& mesh) {
     }
 
     ++revision_;
+
+    fprintf(stderr, "[SurfaceGPU] Upload complete: vertices=%u indices=%u edges=%u vertexBuf=%s indexBuf=%s\n",
+            vertexCount_, indexCount_, edgeCount_,
+            vertexBuffer_.IsValid() ? "OK" : "NULL",
+            indexBuffer_.IsValid() ? "OK" : "NULL");
+    fprintf(stderr, "[SurfaceGPU] GPU memory: vertex=%.1fKB index=%.1fKB edge=%.1fKB total=%.1fKB\n",
+            vertexBuffer_.size / 1024.0, indexBuffer_.size / 1024.0,
+            edgeIndexBuffer_.IsValid() ? edgeIndexBuffer_.size / 1024.0 : 0.0,
+            (vertexBuffer_.size + indexBuffer_.size + (edgeIndexBuffer_.IsValid() ? edgeIndexBuffer_.size : 0)) / 1024.0);
+    fflush(stderr);
+
     return true;
 }
 

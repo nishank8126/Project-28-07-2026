@@ -13,6 +13,7 @@
 #include "workstation/spatial/SpatialTree.h"
 #include "workstation/spatial/CoordinateNormalizationManager.h"
 #include "workstation/surface/SurfaceRenderer.h"
+#include "workstation/display/DisplayModeManager.h"
 
 #include "workstation/vulkan/VulkanInstance.h"
 #include "workstation/vulkan/VulkanDevice.h"
@@ -85,6 +86,13 @@ public:
     // nothing if there's no active cloud or its root has no Normals channel.
     void RefreshNormals();
 
+    // Re-uploads the active cloud's Classification channel to the already
+    // -prepared GPU geometry. Called after ClassificationTool's manual edits
+    // or automated Classify* passes write new codes into the CPU-side
+    // channel, since that write alone doesn't touch the GPU buffer built at
+    // load time.
+    void RefreshClassification();
+
     // Uploads .snt (or similar) 2-D/3-D vector CAD geometry as a persistent
     // line overlay drawn on top of the point cloud each frame. Pass an
     // empty SntEntities to clear the overlay.
@@ -108,6 +116,13 @@ public:
     void RemoveSntAttachment(cad::SntAttachment* attachment);
     void RemoveAllCadAttachments();
     void SetCadLayerVisibility(const std::string& layerName, bool visible);
+
+    void LoadClassificationPTC(const std::string& filepath, std::string* error = nullptr);
+    void SetCustomClassificationPalette(const display::ClassPalette& palette);
+    void ClearCustomClassificationPalette();
+    bool HasCustomPalette() const { return hasCustomPalette_; }
+    const display::ClassPalette& GetCustomPalette() const { return customPalette_; }
+    void UpdateClassificationVisibility(int classCode, bool visible);
 
     RenderContext& GetContext() { return context_; }
     PointCloudRenderAdapter& GetAdapter() { return adapter_; }
@@ -173,6 +188,11 @@ private:
 
     surface::SurfaceInitParams surfaceInitParams_;
 
+    vulkan::GPUBuffer classificationBuffer_;
+    VkDescriptorSet classificationDescriptorSet_ = VK_NULL_HANDLE;
+    bool hasCustomPalette_ = false;
+    display::ClassPalette customPalette_;
+
     pointcloud::PointCloud* activeCloud_ = nullptr;
 
     vulkan::GPUBuffer overlayVertexBuffer_;
@@ -180,6 +200,7 @@ private:
 
     uint64_t lastFrameTime_ = 0;
     uint32_t frameNumber_ = 0;
+    uint32_t cloudLoadedAtFrame_ = 0;
     bool frameStarted_ = false;
     bool useImGui_ = false;
 

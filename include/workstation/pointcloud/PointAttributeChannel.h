@@ -30,6 +30,7 @@ public:
     const double* Scale() const { return scale_; }
     const double* Offset() const { return offset_; }
     const uint8_t* Data() const { return data_.empty() ? nullptr : data_.data(); }
+    uint8_t* MutableData() { return data_.empty() ? nullptr : data_.data(); }
 
     // Decode one XYZ element (applies scale/offset). Valid for the XYZ channel.
     bool ReadXYZ(size_t index, double out[3]) const;

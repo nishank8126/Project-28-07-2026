@@ -84,6 +84,10 @@ public:
     void SetSurfaceGenParams(const surface::SurfaceGenerationParams& params) { m_surfaceGenParams = params; }
     const surface::SurfaceGenerationParams& GetSurfaceGenParams() const { return m_surfaceGenParams; }
 
+    void LoadClassificationPTC(const QString& path, QString* error = nullptr);
+    void ClearCustomClassificationPalette();
+    void UpdateClassificationVisibility(int classCode, bool visible);
+
 signals:
     void statusChanged(const QString& text);
     void selectionChanged(uint64_t objectID);

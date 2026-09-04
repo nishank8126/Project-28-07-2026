@@ -51,8 +51,15 @@ void main() {
         discard;
     }
 
+    // Only fade at the sprite's circular edge (antialiasing) - a distance
+    // -based alpha fade was previously multiplied in here too, which floored
+    // at 0.3 opacity for far points and, blended over the dark background
+    // through many overlapping points, washed every colour (including
+    // classification palette colours) toward a muddy grey/black regardless
+    // of the point's true colour. Classification/RGB/etc. colours should
+    // read at full strength; distance cues belong in a dedicated depth
+    // -shading mode, not baked into every mode's alpha.
     float edgeFade = smoothstep(adaptiveThreshold, adaptiveThreshold * 0.7, dist);
-    float depthFade = clamp(1.0 - inDepth * 0.0001, 0.3, 1.0);
 
-    outColor = vec4(inColor.rgb, edgeFade * depthFade);
+    outColor = vec4(inColor.rgb, edgeFade);
 }

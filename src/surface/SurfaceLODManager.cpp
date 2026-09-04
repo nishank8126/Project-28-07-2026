@@ -33,6 +33,10 @@ void SurfaceLODManager::GenerateLODs(const pointcloud::PointCloud& cloudIn,
         level.maxPoints = static_cast<uint32_t>(config_.baseMaxPoints * fraction);
         if (level.maxPoints < 1000) level.maxPoints = 1000;
         if (level.maxPoints > totalPoints) level.maxPoints = totalPoints;
+        // Hard safety cap regardless of config: DelaunayTriangulator is O(n^2)
+        // and anything beyond ~20k points risks the same multi-minute hang
+        // this LOD system previously reintroduced at its old 200k default.
+        if (level.maxPoints > 20000) level.maxPoints = 20000;
         level.maxEdgeLength = params.maxEdgeLength * (1u << i);
         level.minScreenFraction = config_.minScreenFraction * static_cast<float>(1u << i);
 

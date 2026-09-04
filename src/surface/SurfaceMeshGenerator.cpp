@@ -152,52 +152,88 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
     auto& vertices = mesh.Vertices();
     if (pointCount == 0 || vertices.empty()) return;
 
-    // Pass 1: source bounds.
+    size_t stride = 1;
+    if (pointCount > kColorLookupPointBudget) {
+        stride = pointCount / kColorLookupPointBudget + 1;
+    }
+
+    // Decode every sampled point's XYZ+RGB into flat arrays ONCE up front.
+    // The grid-query loop below previously re-decoded XYZ (via a per-call
+    // channel lookup + 3 memcpys) for every candidate point it examined in
+    // each vertex's 27-cell neighbourhood search - for a few million source
+    // points and tens of thousands of mesh vertices that's on the order of
+    // a hundred million redundant channel decodes, which is what actually
+    // made surface generation take over a minute (triangulation itself was
+    // a few seconds). Flat-array indexing turns each of those lookups into
+    // a single memory read.
+    //
+    // Also fixes a real correctness bug: LasFileReader stores RGB as
+    // Float32 (see LasFileReader.cpp), but this used to call the uint8
+    // ReadRGB accessor, which just returns raw bytes of the float data
+    // reinterpreted as color components - not the actual decoded colour.
+    std::vector<float> px, py, pz;
+    std::vector<uint8_t> pr, pg, pb;
+    size_t reserveHint = pointCount / stride + 1;
+    px.reserve(reserveHint); py.reserve(reserveHint); pz.reserve(reserveHint);
+    pr.reserve(reserveHint); pg.reserve(reserveHint); pb.reserve(reserveHint);
+
     double minX = std::numeric_limits<double>::max();
     double minY = std::numeric_limits<double>::max();
     double minZ = std::numeric_limits<double>::max();
     double maxX = std::numeric_limits<double>::lowest();
     double maxY = std::numeric_limits<double>::lowest();
     double maxZ = std::numeric_limits<double>::lowest();
-    for (size_t i = 0; i < pointCount; ++i) {
+
+    auto& channels = cloud.Root()->channels();
+    for (size_t i = 0; i < pointCount; i += stride) {
         double xyz[3];
-        if (!cloud.Root()->channels().ReadXYZ(i, xyz)) continue;
+        if (!channels.ReadXYZ(i, xyz)) continue;
+
+        float rgbf[3];
+        uint8_t rgb8[3];
+        if (channels.ReadRGBFloat(i, rgbf)) {
+            rgb8[0] = static_cast<uint8_t>(std::clamp(rgbf[0], 0.0f, 1.0f) * 255.0f);
+            rgb8[1] = static_cast<uint8_t>(std::clamp(rgbf[1], 0.0f, 1.0f) * 255.0f);
+            rgb8[2] = static_cast<uint8_t>(std::clamp(rgbf[2], 0.0f, 1.0f) * 255.0f);
+        } else if (!channels.ReadRGB(i, rgb8)) {
+            continue;
+        }
+
+        px.push_back(static_cast<float>(xyz[0]));
+        py.push_back(static_cast<float>(xyz[1]));
+        pz.push_back(static_cast<float>(xyz[2]));
+        pr.push_back(rgb8[0]); pg.push_back(rgb8[1]); pb.push_back(rgb8[2]);
+
         minX = std::min(minX, xyz[0]); maxX = std::max(maxX, xyz[0]);
         minY = std::min(minY, xyz[1]); maxY = std::max(maxY, xyz[1]);
         minZ = std::min(minZ, xyz[2]); maxZ = std::max(maxZ, xyz[2]);
     }
+
+    const size_t n = px.size();
+    if (n == 0) return;
     double dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
     double diag = std::sqrt(dx * dx + dy * dy + dz * dz);
-    if (diag <= 0.0 || pointCount == 0) return;
+    if (diag <= 0.0) return;
 
     // Cell size ~ twice the average sample spacing so each cell holds tens of
     // points; queries then cover far more than the true nearest neighbourhood.
     ColorLookupGrid grid;
-    grid.cellSize = diag / std::cbrt(static_cast<double>(pointCount)) * 2.0;
-    grid.cells.reserve(pointCount / 8 + 64);
+    grid.cellSize = diag / std::cbrt(static_cast<double>(n)) * 2.0;
+    grid.cells.reserve(n / 8 + 64);
 
-    size_t stride = 1;
-    if (pointCount > kColorLookupPointBudget) {
-        stride = pointCount / kColorLookupPointBudget + 1;
-    }
-
-    // Pass 2: populate the grid.
-    for (size_t i = 0; i < pointCount; i += stride) {
-        double xyz[3];
-        if (!cloud.Root()->channels().ReadXYZ(i, xyz)) continue;
-        int64_t gx = static_cast<int64_t>(std::floor((xyz[0] - minX) / grid.cellSize));
-        int64_t gy = static_cast<int64_t>(std::floor((xyz[1] - minY) / grid.cellSize));
-        int64_t gz = static_cast<int64_t>(std::floor((xyz[2] - minZ) / grid.cellSize));
+    for (size_t i = 0; i < n; ++i) {
+        int64_t gx = static_cast<int64_t>(std::floor((px[i] - minX) / grid.cellSize));
+        int64_t gy = static_cast<int64_t>(std::floor((py[i] - minY) / grid.cellSize));
+        int64_t gz = static_cast<int64_t>(std::floor((pz[i] - minZ) / grid.cellSize));
         grid.cells[ColorLookupGrid::Key(gx, gy, gz)].push_back(static_cast<uint32_t>(i));
     }
 
     // Query: nearest source point in the 27-cell neighbourhood.
-    auto fileChannels = &cloud.Root()->channels();
     for (auto& v : vertices) {
-        double px = v.position[0], py = v.position[1], pz = v.position[2];
-        int64_t gx = static_cast<int64_t>(std::floor((px - minX) / grid.cellSize));
-        int64_t gy = static_cast<int64_t>(std::floor((py - minY) / grid.cellSize));
-        int64_t gz = static_cast<int64_t>(std::floor((pz - minZ) / grid.cellSize));
+        double vx = v.position[0], vy = v.position[1], vz = v.position[2];
+        int64_t gx = static_cast<int64_t>(std::floor((vx - minX) / grid.cellSize));
+        int64_t gy = static_cast<int64_t>(std::floor((vy - minY) / grid.cellSize));
+        int64_t gz = static_cast<int64_t>(std::floor((vz - minZ) / grid.cellSize));
 
         double bestDist = std::numeric_limits<double>::max();
         uint32_t bestIdx = 0;
@@ -209,9 +245,7 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
                     auto it = grid.cells.find(ColorLookupGrid::Key(gx + ox, gy + oy, gz + oz));
                     if (it == grid.cells.end()) continue;
                     for (uint32_t idx : it->second) {
-                        double xyz[3];
-                        if (!fileChannels->ReadXYZ(idx, xyz)) continue;
-                        double ddx = xyz[0] - px, ddy = xyz[1] - py, ddz = xyz[2] - pz;
+                        double ddx = px[idx] - vx, ddy = py[idx] - vy, ddz = pz[idx] - vz;
                         double dist = ddx * ddx + ddy * ddy + ddz * ddz;
                         if (dist < bestDist) {
                             bestDist = dist;
@@ -223,11 +257,10 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
             }
         }
 
-        uint8_t rgb[3];
-        if (found && fileChannels->ReadRGB(bestIdx, rgb)) {
-            v.color[0] = rgb[0] / 255.0f;
-            v.color[1] = rgb[1] / 255.0f;
-            v.color[2] = rgb[2] / 255.0f;
+        if (found) {
+            v.color[0] = pr[bestIdx] / 255.0f;
+            v.color[1] = pg[bestIdx] / 255.0f;
+            v.color[2] = pb[bestIdx] / 255.0f;
         }
         // Not found: point is outside the indexed extent, keep the mesh's
         // seeded mid-grey colour (same visual as the no-RGB path).

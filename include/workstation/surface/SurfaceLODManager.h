@@ -21,7 +21,12 @@ struct SurfaceLODLevel {
 
 struct SurfaceLODConfig {
     uint32_t lodCount = 3;
-    uint32_t baseMaxPoints = 200000;
+    // DelaunayTriangulator::Triangulate is O(n^2) (see the comment on
+    // SurfaceGenerationParams::maxPoints) - 200,000 points here previously
+    // meant LOD0 alone took on the order of a minute, appearing to hang the
+    // app. Match the same conservative cap used everywhere else that feeds
+    // the triangulator.
+    uint32_t baseMaxPoints = 15000;
     float lodBias = 1.0f;
     float minScreenFraction = 0.005f;
     bool frustumCulling = true;

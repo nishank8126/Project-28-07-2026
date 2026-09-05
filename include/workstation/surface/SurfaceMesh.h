@@ -14,7 +14,9 @@ struct SurfaceVertex {
     float position[3];
     float normal[3];
     float color[3];
+    uint32_t classificationID;
 };
+static_assert(sizeof(SurfaceVertex) == 40, "SurfaceVertex must be 40 bytes (3*4 + 3*4 + 3*4 + 4)");
 
 struct SurfaceTriangle {
     uint32_t indices[3];

@@ -233,6 +233,8 @@ add_library(workstation
     src/surface/SurfaceRenderer.cpp
     src/surface/SurfaceMeshCache.cpp
     src/surface/SurfaceLODManager.cpp
+    src/surface/ElevationGrid.cpp
+    src/surface/ElevationCache.cpp
     src/scene/SurfaceSceneObject.cpp
 )
 

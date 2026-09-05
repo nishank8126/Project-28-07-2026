@@ -351,6 +351,43 @@ void MainWindow::buildMenu() {
         connect(act, &QAction::triggered, this, [this, mode]() { onVisualizationModeSelected(mode); });
     }
 
+    vizMenu->addSeparator();
+    QAction* elevHeatmapAct = vizMenu->addAction("Elevation &Heatmap");
+    connect(elevHeatmapAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            m_viewport->SetVisualizationMode(3);
+            m_viewport->SetSurfaceShading(6);
+        }
+    });
+    QAction* hillshadeAct = vizMenu->addAction("&Hillshade");
+    connect(hillshadeAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            m_viewport->SetVisualizationMode(3);
+            m_viewport->SetSurfaceShading(7);
+        }
+    });
+    QAction* slopeAct = vizMenu->addAction("&Slope");
+    connect(slopeAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            m_viewport->SetVisualizationMode(3);
+            m_viewport->SetSurfaceShading(8);
+        }
+    });
+    QAction* aspectAct = vizMenu->addAction("&Aspect");
+    connect(aspectAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            m_viewport->SetVisualizationMode(3);
+            m_viewport->SetSurfaceShading(9);
+        }
+    });
+    QAction* elevCompositeAct = vizMenu->addAction("Elevation &Composite");
+    connect(elevCompositeAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) {
+            m_viewport->SetVisualizationMode(3);
+            m_viewport->SetSurfaceShading(10);
+        }
+    });
+
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     QAction* aboutAct = helpMenu->addAction("&About WorkstationCAD");
     connect(aboutAct, &QAction::triggered, this, &MainWindow::onAbout);

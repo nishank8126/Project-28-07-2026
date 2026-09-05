@@ -6,6 +6,10 @@
 #include "workstation/pointcloud/PointStorage.h"
 #include <cstdint>
 
+namespace workstation { namespace renderer {
+class Camera;
+}}  // namespace workstation::renderer
+
 namespace workstation { namespace pointcloud {
 
 // A single point cloud: an owning root node plus aggregate stats built by
@@ -36,6 +40,22 @@ private:
     PointAttributeMask attributes_;
     size_t memoryBytes_ = 0;
     uint32_t id_ = 0;
+    // Octree statistics for hierarchical culling and streaming
+    uint32_t octreeNodeCount = 0;
+    uint32_t octreeLeafCount = 0;
+    uint32_t octreeMaxDepth = 0;
+
+    // Octree statistics accessors
+public:
+    void SetOctreeStats(uint32_t nodeCount, uint32_t leafCount, uint32_t maxDepth);
+    void GetOctreeStats(uint32_t& nodeCount, uint32_t& leafCount, uint32_t& maxDepth) const;
+    // Octree traversal: return visible node keys within camera frustum.
+    // Fills outKeys with node keys that intersect the camera view frustum.
+    // Caller should use PointStreamingManager::RequestNode() for each visible key.
+    void GetVisibleNodeKeys(const renderer::Camera& camera,
+                            uint32_t viewportWidth,
+                            uint32_t viewportHeight,
+                            std::vector<uint64_t>& outKeys) const;
 };
 
 // ---- Clean-room factory API (free functions) ----

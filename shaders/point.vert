@@ -33,16 +33,10 @@ layout(std430, set = 0, binding = 0) readonly buffer ClassificationColors {
     vec4 classificationColors[256];
 };
 
-struct VertexOutput {
-    vec4 gl_Position;
-    vec4 color;
-    float gl_PointSize;
-    float depth;
-    vec3 worldPos;
-    vec3 normal;
-};
-
-layout(location = 0) out VertexOutput vertOutput;
+layout(location = 0) out vec4 fragColor;
+layout(location = 1) out float fragDepth;
+layout(location = 2) out vec3 fragWorldPos;
+layout(location = 3) out vec3 fragNormal;
 
 // ---------------------------------------------------------------------------
 // ASPRS LAS 1.4 classification colours (18 classes) -- full palette
@@ -114,10 +108,10 @@ void main() {
     if (visualizationMode == 11u) {
         // DEBUG mode: bypass everything, just project and use fixed size
         gl_Position = viewProjection * pos;
-        vertOutput.color = vec4(1.0, 0.0, 0.0, 1.0);
-        vertOutput.depth = gl_Position.w;
-        vertOutput.worldPos = inPosition;
-        vertOutput.normal = vec3(0.0);
+        fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        fragDepth = gl_Position.w;
+        fragWorldPos = inPosition;
+        fragNormal = vec3(0.0);
         gl_PointSize = 5.0;
         return;
     }
@@ -143,7 +137,11 @@ void main() {
             if (hasCustomPalette == 1u) {
                 int cls = clamp(int(inClassification), 0, 255);
                 vec4 custom = classificationColors[cls];
-                visualColor = vec4(custom.rgb, custom.a);
+                // DEBUG: force bright colors for known ENEL classes to verify SSBO lookup
+                if (cls == 14) { visualColor = vec4(1.0, 0.0, 0.0, 1.0); }
+                else if (cls == 16) { visualColor = vec4(0.0, 0.0, 1.0, 1.0); }
+                else if (cls == 17) { visualColor = vec4(0.6, 0.3, 0.0, 1.0); }
+                else { visualColor = vec4(custom.rgb, custom.a); }
             } else {
                 visualColor = vec4(ClassifyColor(inClassification), 1.0);
             }
@@ -231,10 +229,10 @@ void main() {
             break;
     }
 
-    vertOutput.color = visualColor;
-    vertOutput.depth = viewPos.w;
-    vertOutput.worldPos = inPosition;
-    vertOutput.normal = inNormal;
+    fragColor = visualColor;
+    fragDepth = viewPos.w;
+    fragWorldPos = inPosition;
+    fragNormal = inNormal;
     // pointScale (viewport height * 0.5) / dist has no upper bound: for a
     // compact, dense scan viewed at a typical framing distance this computes
     // to a circle tens of pixels wide, so neighbouring points (often

@@ -73,6 +73,12 @@ struct RendererStats {
     double fps = 0.0;
     uint32_t cachedPipelines = 0;
     uint64_t gpuMemoryBytes = 0;
+    uint32_t indirectDrawCount = 0;
+    double gpuComputeTimeMs = 0.0;
+    double gpuRenderTimeMs = 0.0;
+    uint32_t culledNodes = 0;
+    uint32_t indirectDraws = 0;
+    uint32_t lodLevelDistribution[5] = {0,0,0,0,0};
 };
 
 struct LODDebugStats {

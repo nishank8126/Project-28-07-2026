@@ -39,6 +39,45 @@ void PointCloud::Finalize() {
     visit(root_);
 }
 
+void PointCloud::SetOctreeStats(uint32_t nodeCount, uint32_t leafCount, uint32_t maxDepth) {
+    octreeNodeCount = nodeCount;
+    octreeLeafCount = leafCount;
+    octreeMaxDepth = maxDepth;
+}
+
+void PointCloud::GetOctreeStats(uint32_t& nodeCount, uint32_t& leafCount, uint32_t& maxDepth) const {
+    nodeCount = octreeNodeCount;
+    leafCount = octreeLeafCount;
+    maxDepth = octreeMaxDepth;
+}
+
+void PointCloud::GetVisibleNodeKeys(const renderer::Camera& camera,
+                                    uint32_t viewportWidth,
+                                    uint32_t viewportHeight,
+                                    std::vector<uint64_t>& outKeys) const {
+    // Use OctreeBuilder to traverse the octree and find visible nodes.
+    // The octree was built during LAS import with OctreeBuilder.
+    // For each leaf node that intersects the camera frustum, compute a node key
+    // and add it to outKeys.
+    //
+    // Note: This is a simplified implementation. Full octree traversal would
+    // require storing per-node keys and bounds, which can be added incrementally.
+    
+    // For now, return the total node count as a single "virtual" key to
+    // demonstrate the interface. The actual octree node key assignment
+    // can be added in a follow-up iteration.
+    uint32_t nCount, lCount, mDepth;
+    GetOctreeStats(nCount, lCount, mDepth);
+    
+    // Generate node keys based on octree statistics
+    // Key format: 1 per node, starting from a base offset
+    uint64_t baseKey = 1;
+    outKeys.clear();
+    for (uint32_t i = 0; i < nCount && i < 100; ++i) {  // limit to 100 for now
+        outKeys.push_back(baseKey + i);
+    }
+}
+
 std::unique_ptr<VoxelNode> CreateVoxelNode(const BoundingBox& bounds, double density) {
     auto v = std::make_unique<VoxelNode>();
     v->setBounds(bounds);

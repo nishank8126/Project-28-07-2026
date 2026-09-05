@@ -71,6 +71,7 @@ bool ViewportWindow::InitializeRenderer() {
     config.initialHeight = static_cast<uint32_t>(height());
     config.enableValidation = true;
     config.enableImGui = false; // Qt panels are the UI here.
+    config.enableDebugReadback = true;  // Enable debug readback for culling validation
 
     if (!m_renderer->InitializeEmbedded(config, reinterpret_cast<void*>(winId()))) {
         emit statusChanged("Renderer: failed to initialize");
@@ -227,6 +228,26 @@ void ViewportWindow::onFrame() {
     m_lastFrameTimeNs = nowNs;
 
     ApplyHeldKeyMovement(dt);
+
+    // Progressive elevation: swap in higher-res mesh when ready
+    if (elevationGenComplete_.exchange(false, std::memory_order_acquire)) {
+        auto* sr = GetSurfaceRenderer();
+        if (sr && surfaceVisible_ && m_cloud) {
+            auto* entry = elevationCache_.Find(
+                m_cloud->Id(), elevationReadyResolution_,
+                surface::ElevationSourceMode::AllPoints);
+            if (entry && entry->isValid) {
+                sr->ClearAllMeshes();
+                entry->mesh.SetName("Elevation_LOD_" +
+                           std::to_string(elevationReadyResolution_.load()));
+                sr->AddSurfaceMesh(entry->mesh);
+
+                auto& cfg = m_renderer->GetContext().GetConfig();
+                cfg.elevationMin = entry->grid.GetMinElevation();
+                cfg.elevationMax = entry->grid.GetMaxElevation();
+            }
+        }
+    }
 
     m_renderer->BeginFrame();
     m_renderer->RenderFrame();
@@ -474,8 +495,22 @@ void ViewportWindow::SetSurfaceMode(int mode) {
 }
 
 void ViewportWindow::SetSurfaceShading(int shading) {
-    if (auto* sr = GetSurfaceRenderer())
-        sr->SetShading(static_cast<surface::ShadingType>(shading));
+    auto* sr = GetSurfaceRenderer();
+    if (!sr) return;
+
+    // Auto-switch to ShadedSurface mode when user picks a shading type.
+    // Without this, clicking "Elevation Heatmap" only sets ShadingType but
+    // SurfaceMode remains Points (0), so the surface pass is skipped.
+    if (sr->GetMode() == surface::SurfaceMode::Points) {
+        sr->SetMode(surface::SurfaceMode::ShadedSurface);
+    }
+
+    // Auto-generate elevation grid if none exists.
+    if (sr->GetMeshCount() == 0 && m_cloud && m_cloud->Root()) {
+        GenerateSurfaceForCloud();
+    }
+
+    sr->SetShading(static_cast<surface::ShadingType>(shading));
 }
 
 void ViewportWindow::GenerateSurfaceForCloud() {
@@ -484,12 +519,55 @@ void ViewportWindow::GenerateSurfaceForCloud() {
     auto* sr = GetSurfaceRenderer();
     if (!sr) return;
 
-    surface::SurfaceGenerationParams params = m_surfaceGenParams;
-    params.computeNormals = true;
+    uint32_t cloudID = m_cloud->Id();
 
-    sr->GenerateLODs(*m_cloud, params);
-    surfaceVisible_ = true;
-    sr->SetVisible(true);
+    // Initialize cache (idempotent)
+    elevationCache_.Initialize();
+
+    surface::ElevationGridParams params;
+    params.resolution = 256;
+    params.sourceMode = surface::ElevationSourceMode::AllPoints;
+
+    // Stage 1: Instant low-res display (256x256, ~1ms)
+    auto* lod0 = elevationCache_.GetOrCreate(cloudID, *m_cloud, params);
+    if (lod0 && lod0->isValid) {
+        sr->ClearAllMeshes();
+        lod0->mesh.SetName("Elevation_LOD0_256");
+        sr->AddSurfaceMesh(lod0->mesh);
+        surfaceVisible_ = true;
+        sr->SetVisible(true);
+
+        // Push elevation range to renderer config
+        auto& cfg = m_renderer->GetContext().GetConfig();
+        cfg.elevationMin = lod0->grid.GetMinElevation();
+        cfg.elevationMax = lod0->grid.GetMaxElevation();
+    }
+
+    // Stage 2: Progressive background generation of higher resolutions
+    if (pendingElevationGen_.valid()) {
+        pendingElevationGen_.wait();
+    }
+    elevationGenComplete_ = false;
+    pendingElevationGen_ = std::async(
+        std::launch::async, [this, cloudID]() {
+            auto* sr = GetSurfaceRenderer();
+            if (!sr || !m_cloud) return;
+
+            for (uint32_t res : {512u, 1024u, 2048u}) {
+                surface::ElevationGridParams p;
+                p.resolution = res;
+                p.sourceMode = surface::ElevationSourceMode::AllPoints;
+
+                auto* entry = elevationCache_.GetOrCreate(
+                    cloudID, *m_cloud, p);
+                if (entry && entry->isValid) {
+                    elevationReadyResolution_.store(res,
+                        std::memory_order_relaxed);
+                    elevationGenComplete_.store(true,
+                        std::memory_order_release);
+                }
+            }
+        });
 }
 
 void ViewportWindow::SetSurfaceQuality(int quality) {

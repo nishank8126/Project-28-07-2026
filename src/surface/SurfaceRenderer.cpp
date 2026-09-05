@@ -107,8 +107,9 @@ bool SurfaceRenderer::CreatePipeline() {
     pconfig.vertexAttributes = {
         {0, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SurfaceVertex, position)},
         {1, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SurfaceVertex, normal)},
-        {2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SurfaceVertex, color)},
-    };
+{2, 0, VK_FORMAT_R32G32B32_SFLOAT, offsetof(SurfaceVertex, color)},
+    {3, 0, VK_FORMAT_R32_UINT, offsetof(SurfaceVertex, classificationID)},
+};
     pconfig.vertexInput.vertexBindingDescriptionCount =
         static_cast<uint32_t>(pconfig.vertexBindings.size());
     pconfig.vertexInput.pVertexBindingDescriptions = pconfig.vertexBindings.data();
@@ -117,6 +118,7 @@ bool SurfaceRenderer::CreatePipeline() {
     pconfig.vertexInput.pVertexAttributeDescriptions = pconfig.vertexAttributes.data();
 
     pconfig.inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    pconfig.rasterizer.cullMode = VK_CULL_MODE_NONE;
     pconfig.depthStencil.depthTestEnable = VK_TRUE;
     pconfig.depthStencil.depthWriteEnable = VK_TRUE;
     // NOTE: culling must stay OFF. The camera bakes a Y-flip into the
@@ -125,7 +127,6 @@ bool SurfaceRenderer::CreatePipeline() {
     // triangles appear CW on screen and BACK_BIT + CCW would cull exactly
     // the faces we want to see (the #1 cause of "surface not showing").
     // Lighting is unaffected: the shader uses vertex normals, not winding.
-    pconfig.rasterizer.cullMode = VK_CULL_MODE_NONE;
     pconfig.rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     pconfig.rasterizer.lineWidth = 1.0f;
 
@@ -348,8 +349,15 @@ void SurfaceRenderer::UpdatePushConstants(VkCommandBuffer cmd,
         shadingMode = static_cast<float>(static_cast<int>(ShadingType::Unlit));
     }
     pc.shadingParams[0] = shadingMode;
-    pc.shadingParams[1] = params_.depthMin;
-    pc.shadingParams[2] = params_.depthMax;
+
+    // Elevation modes repurpose depthMin/depthMax for elevation range
+    bool isElev = (params_.shading == ShadingType::ElevationHeatmap ||
+                   params_.shading == ShadingType::Hillshade ||
+                   params_.shading == ShadingType::Slope ||
+                   params_.shading == ShadingType::Aspect ||
+                   params_.shading == ShadingType::ElevationComposite);
+    pc.shadingParams[1] = isElev ? params_.elevationMin : params_.depthMin;
+    pc.shadingParams[2] = isElev ? params_.elevationMax : params_.depthMax;
     pc.shadingParams[3] = params_.edlStrength;
 
     vkCmdPushConstants(cmd, pipelineLayout_,

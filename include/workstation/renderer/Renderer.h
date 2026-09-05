@@ -42,6 +42,7 @@ struct RendererConfig {
     bool enableImGui = false;
     uint32_t maxFramesInFlight = 2;
     uint64_t gpuPointBudget = 50'000'000;
+    bool enableDebugReadback = false;
 };
 
 struct VisibilityDebugStats {

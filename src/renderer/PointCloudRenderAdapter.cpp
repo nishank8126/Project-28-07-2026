@@ -1,6 +1,7 @@
 #include "workstation/renderer/PointCloudRenderAdapter.h"
 #include "workstation/pointcloud/PointAttributeChannel.h"
 #include "workstation/pointcloud/PointChannelManager.h"
+#include "workstation/surface/SurfaceLog.h"
 
 namespace workstation {
 namespace renderer {
@@ -148,6 +149,21 @@ void PointCloudRenderAdapter::ExtractPointCloudData(
             }
         } else {
             normals[i * 3 + 1] = 1.0f;
+        }
+    }
+
+    // Diagnostic: log classification distribution once
+    {
+        static bool histDone = false;
+        if (!histDone) {
+            int hist[256] = {};
+            for (size_t k = 0; k < count; ++k) hist[std::clamp((int)classifications[k],0,255)]++;
+            fprintf(stderr, "[Adapter] Classification histogram (%zu pts): ", count);
+            for (int c = 0; c < 56; ++c) if (hist[c]) fprintf(stderr, "%d:%d ", c, hist[c]);
+            fprintf(stderr, "\n"); fflush(stderr);
+            SLOG_INFO("Classification histogram (%zu pts):", count);
+            for (int c = 0; c < 56; ++c) if (hist[c]) SLOG_INFO("  class %d: %d pts", c, hist[c]);
+            histDone = true;
         }
     }
 

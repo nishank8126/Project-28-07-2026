@@ -80,14 +80,9 @@ public:
                 }
             }
 
-            // PTC visibility: some files use "0"/"1" booleans, others use
-            // weight/priority values (0,1,2,5,7). Treat "0" and empty as
-            // hidden; everything else as visible.
+            // This ENEL PTC stores weight (0,1,2,5,7) in detailFields[4],
+            // not a boolean. All defined classes should be visible.
             entry.visible = true;
-            if (detailFields.size() > 4) {
-                const auto& vis = detailFields[4];
-                entry.visible = !vis.empty() && vis != "0";
-            }
             entry.weight = detailFields.size() > 5 ? std::stof(detailFields[5]) : 1.0f;
 
             outPalette[entry.code] = entry;

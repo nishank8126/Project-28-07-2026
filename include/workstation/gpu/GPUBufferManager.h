@@ -20,7 +20,9 @@ enum class BufferType {
     Uniform,
     Storage,
     IndirectDraw,
-    Staging
+    Staging,
+    Visibility,       // NEW: per-node visibility info
+    LODSelected       // NEW: LOD selection result
 };
 
 struct GPUBufferAllocation {
@@ -34,6 +36,33 @@ struct GPUBufferAllocation {
 
     bool IsValid() const { return buffer != VK_NULL_HANDLE; }
 };
+
+struct VisibilityInfo {
+    uint64_t nodeKey = 0;       // Octree node key
+    uint32_t visible : 1;       // 1 = visible, 0 = culled
+    uint32_t lodLevel : 3;      // 0-3 LOD level
+    uint32_t drawCount : 28;    // Number of instances/draws
+};
+
+struct IndirectDrawCommand {
+    uint32_t vertexCount = 0;       // Vertex count per instance
+    uint32_t instanceCount = 0;     // Number of instances
+    uint32_t firstVertex = 0;       // First vertex index
+    uint32_t firstInstance = 0;     // First instance index
+};
+
+struct DrawIndirectCommand {  // Vulkan struct equivalent
+    uint32_t vertexCount;
+    uint32_t instanceCount;
+    uint32_t firstVertex;
+    uint32_t firstInstance;
+};
+
+namespace {
+    // Internal visibility buffer - one per application, accessed via GPUBufferManager
+    VisibilityInfo internalVisibilityBuffer[256];
+    uint32_t internalVisibilityCount = 0;
+}  // anonymous namespace
 
 class GPUBufferManager {
 public:

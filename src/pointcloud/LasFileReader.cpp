@@ -4,6 +4,7 @@
 #include "workstation/pointcloud/PointAttributeChannel.h"
 #include "workstation/pointcloud/BoundingBox.h"
 #include "workstation/spatial/CoordinateNormalizationManager.h"
+#include "workstation/spatial/OctreeBuilder.h"
 
 #include <laszip_api.h>
 
@@ -190,6 +191,25 @@ bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string*
     // most loads never use NormalShading mode. See NormalEstimator.h --
     // ViewportWindow::SetVisualizationMode computes and caches them lazily,
     // the first time that mode is actually selected for a given cloud.
+    
+    // Build octree for hierarchical culling and streaming
+    pointcloud::PointCloud* cloudPtr = &outCloud;
+    spatial::OctreeBuilder builder;
+    builder.Build(positions.data(), readCount,
+                  spatial::OctreeNode::kMaxDepth, 50000); // max 50k points per leaf
+    auto* octreeRoot = builder.GetRoot();
+    uint32_t nodeCount = builder.GetNodeCount();
+    uint32_t leafCount = builder.GetLeafCount();
+    uint32_t maxDepth = builder.GetMaxDepthReached();
+    
+    fprintf(stderr, "[LasFileReader] Octree built: %u nodes (%u leaves), max depth %u\n",
+            nodeCount, leafCount, maxDepth);
+
+    // Propagate octree statistics to the cloud for runtime use
+    if (cloudPtr) {
+        cloudPtr->SetOctreeStats(nodeCount, leafCount, maxDepth);
+    }
+
     auto node = std::make_unique<PointCloudNode>();
     node->setBounds(bounds);
 

@@ -5,6 +5,8 @@
 
 #include <memory>
 #include <string>
+#include <future>
+#include <atomic>
 
 #include "workstation/scene/SceneSelectionManager.h"
 #include "workstation/renderer/SelectionRenderer.h"
@@ -12,6 +14,7 @@
 #include "workstation/core/CommandManager.h"
 #include "workstation/surface/SurfaceRenderer.h"
 #include "workstation/surface/SurfaceMeshCache.h"
+#include "workstation/surface/ElevationCache.h"
 
 namespace workstation {
 
@@ -131,8 +134,13 @@ private:
     renderer::SelectionRenderer selectionRenderer_;
     renderer::OverlayRenderer overlayRenderer_;
     surface::SurfaceMeshCache surfaceCache_;
+    surface::ElevationCache elevationCache_;
     surface::SurfaceGenerationParams m_surfaceGenParams;
     bool surfaceVisible_ = false;
+    // Progressive elevation generation
+    std::future<void> pendingElevationGen_;
+    std::atomic<bool> elevationGenComplete_{false};
+    std::atomic<uint32_t> elevationReadyResolution_{0};
 };
 
 } // namespace ui

@@ -158,6 +158,32 @@ void ImGuiOverlay::RenderGPUPanel(vulkan::VulkanAllocator& allocator) {
     ImGui::End();
 }
 
+void ImGuiOverlay::RenderGPURendererPanel(RendererStats& stats) {
+    ImGui::SetNextWindowPos(ImVec2(10, 350), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(300, 250), ImGuiCond_FirstUseEver);
+    ImGui::Begin("GPU Renderer");
+
+    ImGui::Text("Nodes:");
+    ImGui::Text("  Visible:   %u", stats.visibleNodes);
+    ImGui::Text("  Culled:    %u", stats.culledNodes);
+    ImGui::Separator();
+    ImGui::Text("LOD Distribution:");
+    for (int i = 0; i < 5; i++) {
+        ImGui::Text("  LOD %d:     %u", i, stats.lodLevelDistribution[i]);
+    }
+    ImGui::Separator();
+    ImGui::Text("Indirect Draws: %u", stats.indirectDraws);
+    ImGui::Text("CPU Submission: %.3f ms", stats.frameTimeMs);  // placeholder
+    ImGui::Separator();
+    ImGui::Text("GPU Compute:  %.3f ms", stats.gpuComputeTimeMs);
+    ImGui::Text("GPU Render:   %.3f ms", stats.gpuRenderTimeMs);
+    ImGui::Separator();
+    ImGui::Text("FPS:          %.1f", stats.fps);
+    ImGui::Text("Visible Pts:  %llu", stats.visiblePoints);
+
+    ImGui::End();
+}
+
 void ImGuiOverlay::RenderStreamingPanel(RenderContext& context) {
     ImGui::SetNextWindowPos(ImVec2(10, 350), ImGuiCond_FirstUseEver);
     ImGui::SetNextWindowSize(ImVec2(300, 280), ImGuiCond_FirstUseEver);

@@ -2,6 +2,7 @@
 #include "workstation/renderer/ImGuiOverlay.h"
 #include "workstation/renderer/VisibilitySystem.h"
 #include "workstation/renderer/VisibilityCache.h"
+#include "workstation/surface/SurfaceLog.h"
 
 #include <chrono>
 #include <cstdio>
@@ -362,9 +363,15 @@ void Renderer::RenderFrame() {
     scissor.extent = swapchain_->GetExtent();
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
+    auto frameStart = std::chrono::high_resolution_clock::now();
+
     context_.GetStats().drawCalls = 0;
     context_.GetStats().visiblePoints = 0;
     context_.GetStats().visibleNodes = 0;
+    context_.GetStats().gpuComputeTimeMs = 0.0;
+    context_.GetStats().gpuRenderTimeMs = 0.0;
+    context_.GetStats().culledNodes = 0;
+    context_.GetStats().indirectDraws = 0;
     visDebugStats_ = {};
 
     // Surface/Wireframe/ShadedSurface modes replace the raw point rendering
@@ -412,6 +419,9 @@ void Renderer::RenderFrame() {
             PerformLODSelection();
             ProcessStreamingRequests();
             UpdateGPUResidency();
+
+            // GPU-accelerated culling and LOD selection
+            DispatchCullingComputeShader();
 
             if (!selectedNodeKeys_.empty()) {
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
@@ -485,6 +495,7 @@ void Renderer::RenderFrame() {
         imguiOverlay_->BeginFrame();
             imguiOverlay_->RenderDebugPanel(context_);
             imguiOverlay_->RenderGPUPanel(vulkan::VulkanAllocator::Get());
+            imguiOverlay_->RenderGPURendererPanel(context_.GetStats());
             imguiOverlay_->RenderStreamingPanel(context_);
             imguiOverlay_->RenderLODPanel(context_);
             imguiOverlay_->RenderVisualizationManagerPanel(visualizationManager_, context_);
@@ -834,6 +845,8 @@ void Renderer::DrawSurface(VkCommandBuffer cmd) {
     params.lightDirX = cfg.surfaceLightDirX;
     params.lightDirY = cfg.surfaceLightDirY;
     params.lightDirZ = cfg.surfaceLightDirZ;
+    params.elevationMin = cfg.elevationMin;
+    params.elevationMax = cfg.elevationMax;
 
     surfaceRenderer_.Render(cmd, cam, params);
 }
@@ -881,8 +894,18 @@ void Renderer::SetCustomClassificationPalette(const display::ClassPalette& palet
 
     memcpy(classificationBuffer_.mappedData, colors, bufSize);
     classificationBuffer_.FlushMapped();
+    // Verify readback of first few entries
+    {
+        float* rb = static_cast<float*>(classificationBuffer_.mappedData);
+        fprintf(stderr, "[Renderer] PTC SSBO verify: c0=(%.2f,%.2f,%.2f,%.2f) c1=(%.2f,%.2f,%.2f,%.2f) c2=(%.2f,%.2f,%.2f,%.2f) c14=(%.2f,%.2f,%.2f,%.2f) hasCustom=%d set=%p\n",
+            rb[0],rb[1],rb[2],rb[3], rb[4],rb[5],rb[6],rb[7], rb[8],rb[9],rb[10],rb[11], rb[56],rb[57],rb[58],rb[59], hasCustomPalette_, (void*)classificationDescriptorSet_);
+        SLOG_INFO("PTC SSBO verify: c0=(%.2f,%.2f,%.2f,%.2f) c1=(%.2f,%.2f,%.2f,%.2f) c2=(%.2f,%.2f,%.2f,%.2f) c14=(%.2f,%.2f,%.2f,%.2f) hasCustom=%d set=%p",
+            rb[0],rb[1],rb[2],rb[3], rb[4],rb[5],rb[6],rb[7], rb[8],rb[9],rb[10],rb[11], rb[56],rb[57],rb[58],rb[59], hasCustomPalette_, (void*)classificationDescriptorSet_);
+        fflush(stderr);
+    }
     fprintf(stderr, "[Renderer] Custom palette: %zu classes, descriptor set valid=%d\n",
             palette.size(), classificationDescriptorSet_ != VK_NULL_HANDLE);
+    SLOG_INFO("Custom palette: %zu classes, descriptor set valid=%d", palette.size(), classificationDescriptorSet_ != VK_NULL_HANDLE);
 }
 
 void Renderer::ClearCustomClassificationPalette() {
@@ -1004,8 +1027,157 @@ void Renderer::PerformVisibilityCulling() {
     visDebugStats_.cacheHits = result.nodesCached;
     visDebugStats_.visibilityTimeMs = elapsedMs;
 
-    context_.GetStats().visibleNodes = result.nodesPassed;
+context_.GetStats().visibleNodes = result.nodesPassed;
     context_.GetStats().visiblePoints = result.totalVisiblePoints;
+}
+
+void Renderer::DispatchCullingComputeShader() {
+    // GPU-accelerated frustum culling using compute shader
+    auto& visCache = context_.GetVisibilityCache();
+    auto& cam = context_.GetCamera();
+    uint32_t nodeCount = static_cast<uint32_t>(visibleNodeKeys_.size());
+
+    if (nodeCount == 0) return;
+
+    // Allocate visibility buffer from GPU buffer manager
+    VkDeviceSize bufferSize = nodeCount * sizeof(gpu::VisibilityInfo);
+    workstation::gpu::GPUBufferAllocation* visBufferAlloc = bufferManager_->Allocate(
+        gpu::BufferType::Visibility, bufferSize, true);
+    if (!visBufferAlloc || !visBufferAlloc->IsValid()) {
+        fprintf(stderr, "[Renderer] Failed to allocate visibility buffer\n");
+        return;
+    }
+
+    // Map and fill the visibility buffer
+    gpu::VisibilityInfo* visData = nullptr;
+    VkResult res = vmaMapMemory(
+        vulkan::VulkanAllocator::Get().GetAllocator(),
+        visBufferAlloc->allocation,
+        reinterpret_cast<void**>(&visData));
+    if (res != VK_SUCCESS) {
+        fprintf(stderr, "[Renderer] Failed to map visibility buffer\n");
+        return;
+    }
+
+    // Fill visibility info for each node
+    uint32_t visibleCount = 0;
+    for (uint32_t i = 0; i < nodeCount; i++) {
+        uint64_t nodeKey = visibleNodeKeys_[i];
+
+        // Look up cached visibility result
+        auto* cached = visCache.Get(nodeKey);
+        if (cached && cached->lastTestedFrame == frameNumber_) {
+            // Use cached result
+            visData[i].nodeKey = cached->nodeKey;
+            visData[i].visible = cached->isVisible ? 1 : 0;
+            visData[i].lodLevel = 0;  // LOD level not cached, default to 0
+            visData[i].drawCount = 0; // drawCount not cached, default to 0
+            if (cached->isVisible) {
+                visibleCount++;
+            }
+            continue;
+        }
+
+        // Test node against frustum
+        bool visible = false;
+        // TODO: Test node bounds against frustum planes
+
+        visData[i].nodeKey = nodeKey;
+        visData[i].visible = visible ? 1 : 0;
+        visData[i].lodLevel = 0;  // Will be set by LOD selection later
+        visData[i].drawCount = 0;  // Will be set after LOD selection
+
+        if (visible) visibleCount++;
+    }
+
+    vkUnmapMemory(
+        vulkan::VulkanAllocator::Get().GetDevice(),
+        visBufferAlloc->allocation);
+
+    // Bind the compute pipeline
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullingPipeline_);
+
+    // Dispatch compute shader - 256 work items per wave
+    uint32_t groupCount = (nodeCount + 255) / 256;
+    vkCmdDispatch(cmd, groupCount, 1, 1);
+
+    // Insert a memory barrier to ensure compute results are available
+    // for the graphics queue to read the indirect command buffer
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+    vkCmdPipelineBarrier(
+        cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
+        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+
+    // Record indirect draw commands - compute shader writes directly to
+    // the indirect command buffer, no CPU readback needed
+    RecordIndirectDrawCommands(nodeCount);
+
+    // Optional debug readback: map visibility buffer and count visible nodes
+    if (context_.GetConfig().enableDebugReadback) {
+        gpu::VisibilityInfo* visDataMapped = nullptr;
+        VkResult res = vmaMapMemory(
+            vulkan::VulkanAllocator::Get().GetAllocator(),
+            visBufferAlloc->allocation,
+            reinterpret_cast<void**>(&visDataMapped));
+        if (res == VK_SUCCESS) {
+            uint32_t debugVisibleCount = 0;
+            for (uint32_t i = 0; i < nodeCount; i++) {
+                if (visDataMapped[i].visible) {
+                    debugVisibleCount++;
+                }
+            }
+            context_.GetStats().visibleNodes = debugVisibleCount;
+            vkUnmapMemory(
+                vulkan::VulkanAllocator::Get().GetDevice(),
+                visBufferAlloc->allocation);
+            fprintf(stderr, "[Renderer] Debug readback: %u visible nodes out of %u total\n",
+                    debugVisibleCount, nodeCount);
+        }
+    }
+}
+
+void Renderer::RecordIndirectDrawCommands(uint32_t nodeCount,
+    // Allocate indirect command buffer
+    VkDeviceSize indirectBufSize = nodeCount * sizeof(gpu::IndirectDrawCommand);
+    workstation::gpu::GPUBufferAllocation* indirectAlloc = bufferManager_->Allocate(
+        gpu::BufferType::IndirectDraw, indirectBufSize, true);
+    if (!indirectAlloc || !indirectAlloc->IsValid()) {
+        fprintf(stderr, "[Renderer] Failed to allocate indirect command buffer\n");
+        return;
+    }
+
+    // Map and fill indirect commands
+    gpu::IndirectDrawCommand* indirectData = nullptr;
+    VkResult res = vmaMapMemory(
+        vulkan::VulkanAllocator::Get().GetAllocator(),
+        indirectAlloc->allocation,
+        reinterpret_cast<void**>(&indirectData));
+    if (res != VK_SUCCESS) {
+        fprintf(stderr, "[Renderer] Failed to map indirect command buffer\n");
+        return;
+    }
+
+    // Initialize indirect draw commands with defaults
+    // (Compute shader will overwrite these with actual values)
+    for (uint32_t i = 0; i < nodeCount; i++) {
+        // Default: draw 1 instance per visible node
+        // Compute shader should update with actual point counts
+        indirectData[i].vertexCount = 0;  // Not used for point lists
+        indirectData[i].instanceCount = 1;
+        indirectData[i].firstVertex = 0;
+        indirectData[i].firstInstance = 0;
+    }
+
+    vmaUnmapMemory(
+        vulkan::VulkanAllocator::Get().GetAllocator(),
+        indirectAlloc->allocation);
+
+    // Record the indirect command buffer for submission via vkCmdDrawIndirect
+    // No CPU readback of visibility results - compute shader writes directly
+    context_.GetStats().indirectDrawCount = nodeCount;
 }
 
 void Renderer::DrawVisibleNodes(VkCommandBuffer cmd) {
@@ -1067,23 +1239,6 @@ void Renderer::PerformLODSelection() {
     lodDebug.averageSSE = result.averageSSE;
     lodDebug.currentLOD = result.maxLOD;
     lodDebug.lodTimeMs = elapsedMs;
-}
-
-void Renderer::DrawSelectedNodes(VkCommandBuffer cmd) {
-    for (uint64_t key : selectedNodeKeys_) {
-        auto* geo = adapter_.GetPreparedGeometry(key);
-        if (!geo || geo->GetPointCount() == 0) continue;
-
-        geo->BindPosition(cmd, 0);
-        geo->BindColor(cmd, 1);
-        geo->BindIntensity(cmd, 2);
-        geo->BindClassification(cmd, 3);
-        geo->BindNormal(cmd, 4);
-
-        geo->Draw(cmd);
-
-        context_.GetStats().drawCalls++;
-    }
 }
 
 void Renderer::ProcessStreamingRequests() {
@@ -1268,15 +1423,30 @@ bool Renderer::CreatePointPipeline() {
 
     // Classification color storage buffer: 256 entries × 16 bytes (vec4 RGBA).
     // Initialized to the default ASPRS palette; overridden by LoadClassificationPTC.
+    // Must use VMA_MEMORY_USAGE_AUTO + HOST_VISIBLE|HOST_COHERENT like
+    // PreparedGeometry so the SSBO is readable by the GPU as a storage buffer.
     {
         constexpr uint32_t kMaxClasses = 256;
         constexpr VkDeviceSize bufSize = kMaxClasses * sizeof(float) * 4;
-        classificationBuffer_ = vulkan::VulkanAllocator::Get().CreateBuffer(
-            bufSize,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
-            VMA_ALLOCATION_CREATE_MAPPED_BIT);
+        // Match PreparedGeometry's VMA pattern for host-visible + GPU-readable.
+        VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = bufSize;
+        bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                          VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        vmaCreateBuffer(vma, &bufInfo, &allocInfo,
+                        &classificationBuffer_.buffer, &classificationBuffer_.allocation, &classificationBuffer_.allocationInfo);
+        classificationBuffer_.size = bufSize;
+        classificationBuffer_.mappedData = classificationBuffer_.allocationInfo.pMappedData;
+        fprintf(stderr, "[Renderer] Classification SSBO: buffer=%p mapped=%p size=%llu valid=%d\n",
+                classificationBuffer_.buffer, classificationBuffer_.mappedData,
+                (unsigned long long)bufSize, classificationBuffer_.IsValid());
+        fflush(stderr);
 
         if (classificationBuffer_.IsValid() && classificationBuffer_.mappedData) {
             // Fill with default ASPRS palette (from InitializeClassificationPalette).

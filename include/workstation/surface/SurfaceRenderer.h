@@ -37,7 +37,15 @@ enum class ShadingType {
     SurfaceShading = 2,
     EyeDomeLighting = 3,
     SurfaceDebug = 4,
-    Unlit = 5
+    Unlit = 5,
+    ElevationHeatmap = 6,   // blue -> cyan -> green -> yellow -> red
+    Hillshade = 7,          // elevation colormap + Phong lighting
+    Slope = 8,              // flat=green, steep=red
+    Aspect = 9,             // compass direction coloring
+    ElevationComposite = 10, // elevation + hillshade + EDL
+    PTCClassification = 11, // PTC classification colors
+    PTC_Hillshade = 12,     // PTC color + Phong lighting
+    ElevationPTCComposite = 13 // elevation heatmap + PTC tint
 };
 
 struct SurfaceRenderParams {
@@ -53,6 +61,8 @@ struct SurfaceRenderParams {
     float lightDirX = 0.35f;
     float lightDirY = 0.35f;
     float lightDirZ = 0.87f;
+    float elevationMin = 0.0f;
+    float elevationMax = 1000.0f;
 };
 
 struct SurfacePushConstants {

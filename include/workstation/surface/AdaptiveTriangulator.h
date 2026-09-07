@@ -36,8 +36,14 @@ public:
     void SetSettings(const TriangulationSettings& s) { settings_ = s; }
     const TriangulationSettings& GetSettings() const { return settings_; }
 
+    // Debug: triangle counts from underlying DelaunayTriangulator
+    size_t GetTrianglesBeforeValidation() const { return triangulator_.GetTrianglesBeforeValidation(); }
+    size_t GetTrianglesAfterEdgeFilter() const { return triangulator_.GetTrianglesAfterEdgeFilter(); }
+    size_t GetTrianglesAfterZFilter() const { return triangulator_.GetTrianglesAfterZFilter(); }
+
 private:
     TriangulationSettings settings_;
+    DelaunayTriangulator triangulator_;
 };
 
 } // namespace surface

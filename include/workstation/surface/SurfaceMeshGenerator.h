@@ -37,6 +37,10 @@ struct SurfaceGenerationParams {
     bool adaptiveTriangulation = true;
     double maxEdgeLength = 0.0;   // 0 = automatic (derived from point spacing)
     double pointSpacing = 0.0;    // 0 = automatic (derived from extent / density)
+    // Maximum Z difference allowed for triangle edges (meters).
+    // Prevents ground-vegetation/building triangles (spikes).
+    // 0 = disabled. Recommended: 1.0-2.0 for LiDAR.
+    double maxElevationJump = 1.0;
 };
 
 // Phase 12 performance metrics captured during the last Generate() call
@@ -46,6 +50,9 @@ struct SurfaceGenerationStats {
     size_t filteredPointCount = 0;   // after dedup + density downsampling
     size_t vertexCount = 0;
     size_t triangleCount = 0;
+    size_t trianglesBeforeValidation = 0; // triangles after initial Delaunay
+    size_t trianglesAfterEdgeFilter = 0;  // after maxEdgeLength filter
+    size_t trianglesAfterZFilter = 0;     // after maxElevationJump filter
     double generationTimeMs = 0.0;   // total Generate() wall time
     double triangulationTimeMs = 0.0;
     double normalTimeMs = 0.0;

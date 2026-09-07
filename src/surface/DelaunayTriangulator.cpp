@@ -108,9 +108,21 @@ bool DelaunayTriangulator::EdgeLengthExceeded(const math::Point3d& p0,
     return edgeLen(p0, p1) > maxEdge || edgeLen(p1, p2) > maxEdge || edgeLen(p2, p0) > maxEdge;
 }
 
+bool DelaunayTriangulator::ElevationJumpExceeded(const math::Point3d& p0,
+                                                 const math::Point3d& p1,
+                                                 const math::Point3d& p2,
+                                                 double maxJump) {
+    if (maxJump <= 0.0) return false;
+    auto zDiff = [](const math::Point3d& a, const math::Point3d& b) {
+        return std::abs(a.z - b.z);
+    };
+    return zDiff(p0, p1) > maxJump || zDiff(p1, p2) > maxJump || zDiff(p2, p0) > maxJump;
+}
+
 SurfaceMesh DelaunayTriangulator::Triangulate(const std::vector<math::Point3d>& inputPoints,
                                                 const TriangulationSettings& settings) {
     settings_ = settings;
+    stats_ = {};  // Reset stats
     SurfaceMesh mesh;
     if (inputPoints.size() < 3) return mesh;
 
@@ -200,6 +212,7 @@ SurfaceMesh DelaunayTriangulator::Triangulate(const std::vector<math::Point3d>& 
                             return SharesSuperTriangleVertex(t, stIdx0, stIdx1, stIdx2);
                         }),
         triangles.end());
+    stats_.trianglesBeforeValidation = triangles.size();
 
     if (settings_.maxEdgeLength > 0.0) {
         triangles.erase(
@@ -211,6 +224,19 @@ SurfaceMesh DelaunayTriangulator::Triangulate(const std::vector<math::Point3d>& 
                             }),
             triangles.end());
     }
+    stats_.trianglesAfterEdgeFilter = triangles.size();
+
+    if (settings_.maxElevationJump > 0.0) {
+        triangles.erase(
+            std::remove_if(triangles.begin(), triangles.end(),
+                            [this, &points](const Triangle& t) {
+                                return ElevationJumpExceeded(
+                                    points[t.v[0]], points[t.v[1]], points[t.v[2]],
+                                    settings_.maxElevationJump);
+                            }),
+            triangles.end());
+    }
+    stats_.trianglesAfterZFilter = triangles.size();
 
     // Validate: reject degenerate (zero-area) triangles and out-of-bounds indices.
     uint32_t vertexCount = static_cast<uint32_t>(points.size() - 3);

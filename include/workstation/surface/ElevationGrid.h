@@ -27,6 +27,10 @@ struct ElevationCell {
     bool interpolated = false;
     uint32_t classCounts[256] = {0};
     uint32_t dominantClass = 0;
+    // Pre-computed terrain normal from neighboring cell elevations
+    float normalX = 0.0f;
+    float normalY = 0.0f;
+    float normalZ = 1.0f;
 
     float AverageElevation() const {
         return (count > 0) ? (sumZ / count) : 0.0f;
@@ -35,7 +39,8 @@ struct ElevationCell {
 
 struct ElevationGridParams {
     uint32_t resolution = 2048;
-    ElevationSourceMode sourceMode = ElevationSourceMode::AllPoints;
+    // GroundOnly for DTM/hillshade - prevents vegetation/building spikes in terrain
+    ElevationSourceMode sourceMode = ElevationSourceMode::GroundOnly;
     // For UserClass mode: which classification codes to include
     std::vector<uint8_t> selectedClasses;
 };
@@ -69,6 +74,9 @@ public:
 
     // Fill empty cells by interpolating from neighbours.
     void InterpolateEmptyCells();
+
+    // Compute terrain normals from neighboring cell elevations.
+    void ComputeNormals();
 
     // Convert to SurfaceMesh for rendering (shared vertices, indexed tris).
     SurfaceMesh CreateMesh();

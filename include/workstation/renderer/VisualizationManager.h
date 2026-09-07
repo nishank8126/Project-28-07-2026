@@ -27,7 +27,21 @@ enum class VisualizationMode {
     SurfaceShading,     // 13 - normals + depth composite
     EyeDomeLighting,    // 14 - screen-space edge-darkening (simplified)
     ClassificationPalette, // 15 - full ASPRS palette (18 classes)
-    SurfaceDebug,          // 16 - green wireframe surface debug
+    SurfaceDebug,       // 16 - green wireframe surface debug
+    // MicroStation-style PTC Shading modes
+    PTCShading,         // 17 - PTC classification color + Phong lighting
+    PTCHillshade,       // 18 - PTC classification color + hillshade
+    PTCEDL,             // 19 - PTC classification color + EDL
+    PTCComposite,       // 20 - PTC color + Phong + EDL + composite depth
+    // Temporary debug modes (remove after validation)
+    DebugPTCOnly = 21,  // PTC base color only
+    DebugNormals = 22,  // Normal visualization
+    DebugNdotL = 23,    // NdotL lighting factor
+    DebugLightingOnly = 24, // Phong on white
+    DebugPTCLighting = 25,  // PTC x Lighting
+    DebugDepth = 26,    // Depth visualization
+    DebugEDL = 27,      // EDL visualization
+    DebugAO = 28,       // AO visualization
 };
 
 struct VisualizationPreset {
@@ -109,12 +123,12 @@ private:
     float depthMin_ = 0.0f;
     float depthMax_ = 1000.0f;
     // Surface shading
-    float surfaceAmbient_ = 0.2f;
-    float surfaceDiffuse_ = 0.7f;
-    float surfaceSpecular_ = 0.3f;
-    float surfaceShininess_ = 32.0f;
+    float surfaceAmbient_ = 0.1f;
+    float surfaceDiffuse_ = 1.0f;
+    float surfaceSpecular_ = 0.05f;
+    float surfaceShininess_ = 64.0f;
     // Eye-dome lighting
-    float edlStrength_ = 1.0f;
+    float edlStrength_ = 1.5f;
 
     // ASPRS LAS 1.4 classification palette (18 standard classes)
     ClassificationPaletteEntry classificationPalette_[kClassificationClassCount] = {};

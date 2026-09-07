@@ -14,12 +14,32 @@
 #include "workstation/pointcloud/PointCloud.h"
 #include "workstation/pointcloud/PointCloudNode.h"
 
+#include <cmath>
 #include <memory>
 #include <vector>
 #include <cstdint>
 
 namespace workstation {
 namespace renderer {
+
+// Convert sun azimuth/elevation angles (degrees) into a unit direction vector
+// pointing TOWARD the light source, in world space with Z up (the LiDAR data
+// convention used throughout this engine). Both the point pipeline and the
+// surface pipeline read this same direction, so moving the sun moves it for
+// every shading mode at once. Pure push-constant math -- no mesh/geometry
+// regeneration is involved.
+//   azimuth:   0-360, compass angle in the XY plane (0 = +X, 90 = +Y)
+//   elevation: 0-90,  angle above the horizon (90 = straight overhead)
+inline void ComputeLightDirection(float azimuthDeg, float elevationDeg,
+                                  float out[3]) {
+    constexpr float kPi = 3.14159265358979f;
+    const float az = azimuthDeg * kPi / 180.0f;
+    const float el = std::clamp(elevationDeg, 0.0f, 90.0f) * kPi / 180.0f;
+    const float cosEl = std::cos(el);
+    out[0] = cosEl * std::cos(az);
+    out[1] = cosEl * std::sin(az);
+    out[2] = std::sin(el);
+}
 
 struct RenderConfig {
     VisualizationMode visualizationMode = VisualizationMode::RGB;
@@ -38,24 +58,28 @@ struct RenderConfig {
     bool useIndirectDrawing = false;
     bool useComputeCulling = false;
     bool forceDrawAll = false;
-    uint32_t maxPointsPerFrame = 50'000'000;
+    uint32_t maxPointsPerFrame = 5'000'000;
     bool lodEnabled = true;
-    float pointBudgetMillions = 25.0f;
+    float pointBudgetMillions = 5.0f;
     int32_t forceLODLevel = -1;
 
     // Depth / Surface shading parameters
     float depthMin = 0.0f;
     float depthMax = 1000.0f;
-    float surfaceAmbient = 0.2f;
-    float surfaceDiffuse = 0.7f;
-    float surfaceSpecular = 0.3f;
-    float surfaceShininess = 32.0f;
-    float edlStrength = 1.0f;
+    float surfaceAmbient = 0.1f;
+    float surfaceDiffuse = 1.0f;
+    float surfaceSpecular = 0.05f;
+    float surfaceShininess = 64.0f;
+    float edlStrength = 1.5f;
     // Surface pipeline light direction (world space). Matches the
     // SurfaceRenderParams defaults so both pipelines agree out of the box.
     float surfaceLightDirX = 0.35f;
     float surfaceLightDirY = 0.35f;
     float surfaceLightDirZ = 0.87f;
+    // Canonical sun control shared by ALL shading pipelines (point + surface).
+    // The default 45/45 reproduces strong directional terrain relief.
+    float lightAzimuthDeg = 45.0f;    // 0-360, compass angle of the light
+    float lightElevationDeg = 45.0f;  // 0-90, angle above the horizon
 };
 
 struct RendererStats {
@@ -78,6 +102,7 @@ struct RendererStats {
     double gpuRenderTimeMs = 0.0;
     uint32_t culledNodes = 0;
     uint32_t indirectDraws = 0;
+    uint32_t gpuCullingDispatches = 0;
     uint32_t lodLevelDistribution[5] = {0,0,0,0,0};
 };
 

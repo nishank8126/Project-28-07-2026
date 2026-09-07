@@ -7,6 +7,8 @@ class QLabel;
 class QToolBar;
 class QLineEdit;
 class QTextEdit;
+class QDialog;
+class QRadioButton;
 
 namespace workstation {
 namespace cad {
@@ -53,12 +55,24 @@ private:
     void buildDockWidgets();
     void buildCommandConsole();
     void addCadToolActions(QToolBar* toolbar);
+    void showRenderingPanel();
+    // Parameters (sliders) + signal wiring for the rendering panel.
+    void applyRenderingPanelState(QDialog* panel,
+                                  QRadioButton* rgbSrc, QRadioButton* ptcSrc,
+                                  QRadioButton* intSrc, QRadioButton* elevSrc,
+                                  QRadioButton* flatSh, QRadioButton* phongSh,
+                                  QRadioButton* hillSh, QRadioButton* edlSh,
+                                  QRadioButton* compSh);
 
     Document m_document;
     ViewportWindow*  m_viewport    = nullptr;
     ModelTreeWidget* m_modelTree   = nullptr;
     PropertiesWidget* m_properties  = nullptr;
     ToolSettingsWidget* m_toolSettings = nullptr;
+
+    // Modeless MicroStation-style LiDAR rendering panel (color source +
+    // shading layer + lighting/EDL parameters). Created on first open.
+    QDialog* m_renderPanel = nullptr;
 
     QLabel* m_rendererStatusLabel = nullptr;
     QLineEdit* m_commandInput = nullptr;

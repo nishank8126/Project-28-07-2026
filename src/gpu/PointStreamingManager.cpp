@@ -1,5 +1,6 @@
 #include "workstation/gpu/PointStreamingManager.h"
 #include "workstation/pointcloud/PointAttributeChannel.h"
+#include "workstation/pointcloud/VoxelNode.h"
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -33,12 +34,17 @@ void PointStreamingManager::Shutdown() {
         std::lock_guard<std::mutex> lock(cpuCacheMutex_);
         cpuCache_.clear();
         cpuCacheUsed_ = 0;
+        nodeKeyMap_.clear();
+        cpuLruList_.clear();
+        cpuLruMap_.clear();
     }
 
     {
         std::lock_guard<std::mutex> lock(gpuResidencyMutex_);
         gpuResidentNodes_.clear();
         gpuMemoryUsed_ = 0;
+        gpuLruList_.clear();
+        gpuLruMap_.clear();
     }
 
     {
@@ -54,6 +60,29 @@ void PointStreamingManager::Shutdown() {
 void PointStreamingManager::SetActiveCloud(pointcloud::PointCloud* cloud) {
     CancelAllRequests();
     activeCloud_ = cloud;
+    BuildNodeKeyMap(cloud);
+}
+
+void PointStreamingManager::BuildNodeKeyMap(pointcloud::PointCloud* cloud) {
+    std::lock_guard<std::mutex> lock(cpuCacheMutex_);
+    nodeKeyMap_.clear();
+    if (!cloud || !cloud->Root()) return;
+
+    uint64_t nextKey = 0;
+    std::function<void(pointcloud::PointCloudNode*)> walk = [&](pointcloud::PointCloudNode* n) {
+        if (!n) return;
+        nodeKeyMap_[nextKey++] = n;
+        if (auto* v = dynamic_cast<pointcloud::VoxelNode*>(n)) {
+            for (size_t i = 0; i < v->ChildCount(); ++i) {
+                walk(v->Child(i));
+            }
+        }
+    };
+    walk(cloud->Root());
+
+    fprintf(stderr, "[Streaming] Built nodeKey map: %zu nodes from cloud '%s'\n",
+            nodeKeyMap_.size(), cloud->Name());
+    fflush(stderr);
 }
 
 void PointStreamingManager::RequestNode(uint64_t nodeKey, float priority,
@@ -152,22 +181,50 @@ void PointStreamingManager::DecodeThreadFunc() {
             {
                 std::lock_guard<std::mutex> lock(cpuCacheMutex_);
                 cpuCache_[request.nodeKey] = std::move(entry);
+                cpuCacheUsed_ += cpuCache_[request.nodeKey]->memorySize;
+                // O(1) LRU: insert at back (most recently used)
+                auto it = cpuLruMap_.find(request.nodeKey);
+                if (it != cpuLruMap_.end()) {
+                    cpuLruList_.erase(it->second);
+                }
+                cpuLruList_.push_back(request.nodeKey);
+                cpuLruMap_[request.nodeKey] = std::prev(cpuLruList_.end());
             }
         }
     }
 }
 
 std::unique_ptr<CPUCacheEntry> PointStreamingManager::DecodeNodeData(uint64_t nodeKey) {
-    if (!activeCloud_ || !activeCloud_->Root()) return nullptr;
+    // Look up the actual node by nodeKey instead of always decoding root
+    pointcloud::PointCloudNode* node = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(cpuCacheMutex_);
+        auto it = nodeKeyMap_.find(nodeKey);
+        if (it != nodeKeyMap_.end()) {
+            node = it->second;
+        }
+    }
 
-    auto* root = activeCloud_->Root();
-    const auto& channels = root->channels();
+    // Fall back to root if key not found (for single-node clouds with key=0)
+    if (!node) {
+        if (!activeCloud_ || !activeCloud_->Root()) return nullptr;
+        node = activeCloud_->Root();
+    }
+
+    const auto& channels = node->channels();
     size_t count = channels.PointCount();
     if (count == 0) return nullptr;
 
     auto entry = std::make_unique<CPUCacheEntry>();
     entry->nodeKey = nodeKey;
     entry->pointCount = static_cast<uint32_t>(count);
+
+    fprintf(stderr, "[Tile Decode] nodeKey=%llu expected=%zu decoded=%zu bounds=(%.2f,%.2f,%.2f)-(%.2f,%.2f,%.2f)\n",
+            (unsigned long long)nodeKey,
+            channels.PointCount(), channels.PointCount(),
+            node->bounds().minX, node->bounds().minY, node->bounds().minZ,
+            node->bounds().maxX, node->bounds().maxY, node->bounds().maxZ);
+    fflush(stderr);
 
     entry->positions.resize(count * 3);
     entry->colors.resize(count * 3, 0.5f);
@@ -248,6 +305,12 @@ void PointStreamingManager::UploadCpuReadyNodes() {
             cpuEntry = std::move(it->second);
             cpuCacheUsed_ -= cpuEntry->memorySize;
             cpuCache_.erase(it);
+            // O(1) LRU: remove from CPU LRU list
+            auto lruIt = cpuLruMap_.find(nodeKey);
+            if (lruIt != cpuLruMap_.end()) {
+                cpuLruList_.erase(lruIt->second);
+                cpuLruMap_.erase(lruIt);
+            }
         }
 
         if (!cpuEntry) continue;
@@ -271,6 +334,13 @@ void PointStreamingManager::UploadCpuReadyNodes() {
 
                 gpuResidentNodes_[nodeKey] = resident;
                 gpuMemoryUsed_ += cpuEntry->memorySize;
+                // O(1) LRU: insert at back (most recently used)
+                auto lruIt = gpuLruMap_.find(nodeKey);
+                if (lruIt != gpuLruMap_.end()) {
+                    gpuLruList_.erase(lruIt->second);
+                }
+                gpuLruList_.push_back(nodeKey);
+                gpuLruMap_[nodeKey] = std::prev(gpuLruList_.end());
                 uploaded = true;
             }
         }
@@ -284,6 +354,13 @@ void PointStreamingManager::UploadCpuReadyNodes() {
                 std::lock_guard<std::mutex> cacheLock(cpuCacheMutex_);
                 cpuCacheUsed_ += cpuEntry->memorySize;
                 cpuCache_[nodeKey] = std::move(cpuEntry);
+                // O(1) LRU: re-insert at back (most recently used)
+                auto lruIt = cpuLruMap_.find(nodeKey);
+                if (lruIt != cpuLruMap_.end()) {
+                    cpuLruList_.erase(lruIt->second);
+                }
+                cpuLruList_.push_back(nodeKey);
+                cpuLruMap_[nodeKey] = std::prev(cpuLruList_.end());
             }
         }
     }
@@ -292,50 +369,50 @@ void PointStreamingManager::UploadCpuReadyNodes() {
 void PointStreamingManager::EvictCpuCache() {
     std::lock_guard<std::mutex> lock(cpuCacheMutex_);
 
-    while (cpuCacheUsed_ > cpuCacheLimit_ && !cpuCache_.empty()) {
-        uint64_t oldestKey = 0;
-        uint64_t oldestFrame = UINT64_MAX;
+    while (cpuCacheUsed_ > cpuCacheLimit_ && !cpuLruList_.empty()) {
+        // O(1): take from front of LRU list (oldest)
+        uint64_t oldestKey = cpuLruList_.front();
+        cpuLruList_.pop_front();
 
-        for (auto& [key, entry] : cpuCache_) {
-            if (!entry->pinned && entry->lastUsedFrame < oldestFrame) {
-                oldestFrame = entry->lastUsedFrame;
-                oldestKey = key;
-            }
+        auto mapIt = cpuLruMap_.find(oldestKey);
+        if (mapIt != cpuLruMap_.end()) {
+            cpuLruMap_.erase(mapIt);
         }
 
-        if (oldestKey == 0) break;
-
-        cpuCacheUsed_ -= cpuCache_[oldestKey]->memorySize;
-        cpuCache_.erase(oldestKey);
-        cpuEvictions_++;
+        auto cacheIt = cpuCache_.find(oldestKey);
+        if (cacheIt != cpuCache_.end()) {
+            cpuCacheUsed_ -= cacheIt->second->memorySize;
+            cpuCache_.erase(cacheIt);
+            cpuEvictions_++;
+        }
     }
 }
 
 void PointStreamingManager::EvictGpuResidency() {
     std::lock_guard<std::mutex> lock(gpuResidencyMutex_);
 
-    while (gpuMemoryUsed_ > gpuMemoryLimit_ && !gpuResidentNodes_.empty()) {
-        uint64_t oldestKey = 0;
-        uint64_t oldestFrame = UINT64_MAX;
+    while (gpuMemoryUsed_ > gpuMemoryLimit_ && !gpuLruList_.empty()) {
+        // O(1): take from front of LRU list (oldest)
+        uint64_t oldestKey = gpuLruList_.front();
+        gpuLruList_.pop_front();
 
-        for (auto& [key, node] : gpuResidentNodes_) {
-            if (node.lastUsedFrame < oldestFrame) {
-                oldestFrame = node.lastUsedFrame;
-                oldestKey = key;
-            }
+        auto mapIt = gpuLruMap_.find(oldestKey);
+        if (mapIt != gpuLruMap_.end()) {
+            gpuLruMap_.erase(mapIt);
         }
 
-        if (oldestKey == 0) break;
+        auto nodeIt = gpuResidentNodes_.find(oldestKey);
+        if (nodeIt != gpuResidentNodes_.end()) {
+            gpuMemoryUsed_ -= nodeIt->second.gpuMemory;
+            gpuResidentNodes_.erase(nodeIt);
+            gpuEvictions_++;
 
-        gpuMemoryUsed_ -= gpuResidentNodes_[oldestKey].gpuMemory;
-        gpuResidentNodes_.erase(oldestKey);
-        gpuEvictions_++;
-
-        {
-            std::lock_guard<std::mutex> reqLock(requestMutex_);
-            auto it = activeRequests_.find(oldestKey);
-            if (it != activeRequests_.end()) {
-                it->second.state = NodeStreamingState::Released;
+            {
+                std::lock_guard<std::mutex> reqLock(requestMutex_);
+                auto it = activeRequests_.find(oldestKey);
+                if (it != activeRequests_.end()) {
+                    it->second.state = NodeStreamingState::Released;
+                }
             }
         }
     }
@@ -419,6 +496,11 @@ GPUResidentNode* PointStreamingManager::GetResidentNode(uint64_t nodeKey) {
     auto it = gpuResidentNodes_.find(nodeKey);
     if (it != gpuResidentNodes_.end() && it->second.resident) {
         it->second.lastUsedFrame = currentFrame_;
+        // O(1) LRU: splice to back (most recently used)
+        auto lruIt = gpuLruMap_.find(nodeKey);
+        if (lruIt != gpuLruMap_.end()) {
+            gpuLruList_.splice(gpuLruList_.end(), gpuLruList_, lruIt->second);
+        }
         return &it->second;
     }
     return nullptr;

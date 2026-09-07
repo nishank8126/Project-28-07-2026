@@ -45,19 +45,32 @@ enum class ShadingType {
     ElevationComposite = 10, // elevation + hillshade + EDL
     PTCClassification = 11, // PTC classification colors
     PTC_Hillshade = 12,     // PTC color + Phong lighting
-    ElevationPTCComposite = 13 // elevation heatmap + PTC tint
+    ElevationPTCComposite = 13, // elevation heatmap + PTC tint
+    // MicroStation-style PTC Shading modes
+    PTCShading = 14,        // PTC classification color + Phong lighting
+    PTCEDL = 15,            // PTC classification color + EDL
+    PTCComposite = 16,      // PTC color + Phong + EDL + composite depth
+    // Temporary debug modes (remove after validation)
+    DebugPTCOnly = 17,      // PTC base color only
+    DebugNormals = 18,      // Normal visualization
+    DebugNdotL = 19,        // NdotL lighting factor
+    DebugLightingOnly = 20, // Phong on white
+    DebugPTCLighting = 21,  // PTC x Lighting
+    DebugDepth = 22,        // Depth visualization
+    DebugEDL = 23,          // EDL visualization
+    DebugAO = 24,           // AO visualization
 };
 
 struct SurfaceRenderParams {
     SurfaceMode mode = SurfaceMode::Points;
     ShadingType shading = ShadingType::Phong;
-    float ambient = 0.2f;
-    float diffuse = 0.7f;
-    float specular = 0.3f;
+    float ambient = 0.1f;
+    float diffuse = 1.0f;
+    float specular = 0.05f;
     float shininess = 32.0f;
     float depthMin = 0.0f;
     float depthMax = 1000.0f;
-    float edlStrength = 1.0f;
+    float edlStrength = 1.5f;
     float lightDirX = 0.35f;
     float lightDirY = 0.35f;
     float lightDirZ = 0.87f;
@@ -120,6 +133,13 @@ public:
     SurfaceMode GetMode() const { return params_.mode; }
     void SetShading(ShadingType shading) { params_.shading = shading; }
 
+    // Descriptor set pointing at the shared classification palette SSBO
+    // (owned by Renderer). The surface pipeline layout declares the SAME
+    // set 0 / binding 0 the point pipeline reads, so every PTC surface
+    // shading mode looks up the SAME palette buffer (no duplicated palettes).
+    // Without this binding the SSBO read is undefined -> grey PTC output.
+    void SetClassificationDescriptorSet(VkDescriptorSet set) { classificationSet_ = set; }
+
     uint32_t GetMeshCount() const { return static_cast<uint32_t>(meshes_.size()); }
     uint32_t GetTotalTriangleCount() const;
     uint32_t GetTotalVertexCount() const;
@@ -153,6 +173,7 @@ private:
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout descriptorLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet classificationSet_ = VK_NULL_HANDLE;
 
     std::vector<std::unique_ptr<SurfaceMeshEntry>> meshes_;
     uint32_t nextMeshID_ = 1;

@@ -41,6 +41,7 @@ public:
     bool LoadDwgAttachment(cad::DwgAttachment* attachment, QString* errorMessage = nullptr);
     bool LoadSntAttachment(cad::SntAttachment* attachment, QString* errorMessage = nullptr);
     void FocusCameraOnLastCadAttachment();
+    void SetTopView();
     void RemoveCadAttachment(cad::DxfAttachment* attachment);
     void RemoveCadAttachment(cad::DwgAttachment* attachment);
     void RemoveCadAttachment(cad::SntAttachment* attachment);
@@ -59,6 +60,19 @@ public:
     renderer::OverlayRenderer* GetOverlayRenderer() { return &overlayRenderer_; }
 
     void SetVisualizationMode(int mode);
+
+    // MicroStation-style rendering panel support. All of these are push
+    // -constant-only updates: they take effect on the very next frame with
+    // no mesh regeneration or GPU re-upload.
+    // Shared Phong material weights (point + surface pipelines).
+    void SetShadingParams(float ambient, float diffuse, float specular, float shininess);
+    // Eye-dome lighting strength (0-5).
+    void SetEDLStrength(float strength);
+    // Sun direction as azimuth (0-360) / elevation (0-90) in degrees.
+    void SetSunAngles(float azimuthDeg, float elevationDeg);
+    // Apply a surface ShadingType only when a surface mesh already exists
+    // (never force-generates one as a side effect of picking a panel mode).
+    void SetSurfaceShadingIfPresent(int shading);
 
     void Undo();
     void Redo();

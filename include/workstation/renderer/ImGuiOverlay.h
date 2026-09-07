@@ -19,6 +19,7 @@ class SurfaceRenderer;
 namespace renderer {
 
 struct VisibilityDebugStats;
+struct RendererStats;
 class DebugRenderer;
 class VisualizationManager;
 
@@ -38,6 +39,7 @@ public:
     void RenderDebugPanel(RenderContext& context);
     void RenderLODPanel(RenderContext& context);
     void RenderGPUPanel(vulkan::VulkanAllocator& allocator);
+    void RenderGPURendererPanel(RendererStats& stats);
     void RenderVisibilityPanel(const VisibilityDebugStats& stats, RenderConfig& config);
     void RenderStreamingPanel(RenderContext& context);
     void RenderToolsPanel(tools::ToolManager& toolManager, RenderContext& context);

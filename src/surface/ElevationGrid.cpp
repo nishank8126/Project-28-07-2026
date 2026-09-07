@@ -123,6 +123,9 @@ void ElevationGrid::Generate(const pointcloud::PointCloud& cloud,
     InterpolateEmptyCells();
     auto t2 = std::chrono::steady_clock::now();
 
+    // --- Compute terrain normals from neighboring cell elevations ---
+    ComputeNormals();
+
     // --- Compute elevation range from REAL data cells only ---
     minElevation_ = std::numeric_limits<float>::max();
     maxElevation_ = std::numeric_limits<float>::lowest();
@@ -295,12 +298,90 @@ void ElevationGrid::InterpolateEmptyCells() {
         SLOG_INFO("InterpolateEmptyCells: filled %u empty cells via BFS", filled);
     }
 }
+ 
+// ---------------------------------------------------------------------------
+// Compute terrain normals from neighboring cell elevations using central
+// differences. For Z-up coordinates:
+//   dzdx = (zRight - zLeft) / (2 * cellSize)
+//   dzdy = (zUp - zDown) / (2 * cellSize)
+//   normal = normalize(-dzdx, -dzdy, 1.0)
+// Boundaries use one-sided differences.
+// ---------------------------------------------------------------------------
+void ElevationGrid::ComputeNormals() {
+    if (cells_.empty() || width_ < 2 || height_ < 2) return;
+    const float inv2dx = 1.0f / (2.0f * cellSize_);
+
+    for (uint32_t y = 0; y < height_; ++y) {
+        for (uint32_t x = 0; x < width_; ++x) {
+            auto& cell = cells_[y * width_ + x];
+            if (!cell.valid) continue;
+
+            float zL = 0.0f, zR = 0.0f, zD = 0.0f, zU = 0.0f;
+            bool hasL = false, hasR = false, hasD = false, hasU = false;
+
+            // Left (x-1)
+            if (x > 0) {
+                const auto& cL = cells_[y * width_ + (x - 1)];
+                if (cL.valid) { zL = cL.AverageElevation(); hasL = true; }
+            }
+            // Right (x+1)
+            if (x + 1 < width_) {
+                const auto& cR = cells_[y * width_ + (x + 1)];
+                if (cR.valid) { zR = cR.AverageElevation(); hasR = true; }
+            }
+            // Down (y-1) - grid Y increases downward
+            if (y > 0) {
+                const auto& cD = cells_[(y - 1) * width_ + x];
+                if (cD.valid) { zD = cD.AverageElevation(); hasD = true; }
+            }
+            // Up (y+1)
+            if (y + 1 < height_) {
+                const auto& cU = cells_[(y + 1) * width_ + x];
+                if (cU.valid) { zU = cU.AverageElevation(); hasU = true; }
+            }
+
+            float dzdx = 0.0f, dzdy = 0.0f;
+
+            if (hasL && hasR) {
+                dzdx = (zR - zL) * inv2dx;
+            } else if (hasR) {
+                // Forward difference
+                dzdx = (zR - cell.AverageElevation()) / cellSize_;
+            } else if (hasL) {
+                // Backward difference
+                dzdx = (cell.AverageElevation() - zL) / cellSize_;
+            }
+
+            if (hasD && hasU) {
+                dzdy = (zU - zD) * inv2dx;
+            } else if (hasU) {
+                dzdy = (zU - cell.AverageElevation()) / cellSize_;
+            } else if (hasD) {
+                dzdy = (cell.AverageElevation() - zD) / cellSize_;
+            }
+
+            // Z-up: normal = normalize(-dzdx, -dzdy, 1.0)
+            float nx = -dzdx;
+            float ny = -dzdy;
+            float nz = 1.0f;
+            float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+            if (len > 1e-6) {
+                cell.normalX = nx / len;
+                cell.normalY = ny / len;
+                cell.normalZ = nz / len;
+            } else {
+                cell.normalX = 0.0f;
+                cell.normalY = 0.0f;
+                cell.normalZ = 1.0f;
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Create a SurfaceMesh with shared vertices from the elevation grid.
 // Triangles touching ANY invalid (un-interpolated) cell are skipped.
-// Normals are left as placeholders — the fragment shader computes them
-// from dFdx/dFdy(fragWorldPos) for smooth terrain shading.
+// Uses pre-computed terrain normals from ComputeNormals().
 // ---------------------------------------------------------------------------
 SurfaceMesh ElevationGrid::CreateMesh() {
     auto t0 = std::chrono::steady_clock::now();
@@ -321,10 +402,10 @@ SurfaceMesh ElevationGrid::CreateMesh() {
             v.position[2] = cell.valid ? cell.AverageElevation()
                                        : 0.0f;
 
-            // Placeholder normal — fragment shader derives real normal
-            v.normal[0] = 0.0f;
-            v.normal[1] = 0.0f;
-            v.normal[2] = 1.0f;
+            // Pre-computed terrain normal from grid elevation differences
+            v.normal[0] = cell.normalX;
+            v.normal[1] = cell.normalY;
+            v.normal[2] = cell.normalZ;
 
             // Classification ID from dominant class in cell (for PTC surface coloring)
             v.classificationID = cell.dominantClass;

@@ -15,6 +15,10 @@ struct TriangulationSettings {
     bool removeDuplicatePoints = true;
     double duplicateThreshold = 0.001;
     double boundaryMargin = 100.0;
+    // Maximum elevation difference allowed for triangle edges (meters).
+    // Prevents connecting ground to vegetation/building points.
+    // 0 = disabled.
+    double maxElevationJump = 1.0;
 };
 
 class DelaunayTriangulator {
@@ -26,6 +30,18 @@ public:
     void SetMaxEdgeLength(double length) { settings_.maxEdgeLength = length; }
     void SetSettings(const TriangulationSettings& s) { settings_ = s; }
     const TriangulationSettings& GetSettings() const { return settings_; }
+
+    // Debug: triangle counts at each validation stage
+    size_t GetTrianglesBeforeValidation() const { return stats_.trianglesBeforeValidation; }
+    size_t GetTrianglesAfterEdgeFilter() const { return stats_.trianglesAfterEdgeFilter; }
+    size_t GetTrianglesAfterZFilter() const { return stats_.trianglesAfterZFilter; }
+
+private:
+    struct TriangulationStats {
+        size_t trianglesBeforeValidation = 0;
+        size_t trianglesAfterEdgeFilter = 0;
+        size_t trianglesAfterZFilter = 0;
+    } stats_;
 
 private:
     struct Edge {
@@ -57,6 +73,9 @@ private:
 
     bool EdgeLengthExceeded(const math::Point3d& p0, const math::Point3d& p1,
                             const math::Point3d& p2, double maxEdge);
+
+    bool ElevationJumpExceeded(const math::Point3d& p0, const math::Point3d& p1,
+                               const math::Point3d& p2, double maxJump);
 
     TriangulationSettings settings_;
 };

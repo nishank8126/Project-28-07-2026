@@ -9,7 +9,7 @@ void VisualizationManager::Initialize() {
     CreateDefaultPresets();
     InitializeClassificationPalette();
 
-    modeNames_.resize(16);
+    modeNames_.resize(static_cast<int>(VisualizationMode::DebugAO) + 1);
     modeNames_[static_cast<int>(VisualizationMode::RGB)] = "RGB";
     modeNames_[static_cast<int>(VisualizationMode::Intensity)] = "Intensity";
     modeNames_[static_cast<int>(VisualizationMode::Classification)] = "Classification";
@@ -26,6 +26,21 @@ void VisualizationManager::Initialize() {
     modeNames_[static_cast<int>(VisualizationMode::SurfaceShading)] = "Surface Shading";
     modeNames_[static_cast<int>(VisualizationMode::EyeDomeLighting)] = "Eye-Dome Lighting";
     modeNames_[static_cast<int>(VisualizationMode::ClassificationPalette)] = "Classification (Full)";
+    modeNames_[static_cast<int>(VisualizationMode::SurfaceDebug)] = "Surface Debug";
+    // MicroStation-style PTC shading modes
+    modeNames_[static_cast<int>(VisualizationMode::PTCShading)] = "PTC + Phong";
+    modeNames_[static_cast<int>(VisualizationMode::PTCHillshade)] = "PTC + Hillshade";
+    modeNames_[static_cast<int>(VisualizationMode::PTCEDL)] = "PTC + EDL";
+    modeNames_[static_cast<int>(VisualizationMode::PTCComposite)] = "PTC Composite";
+    // Temporary debug modes (remove after validation)
+    modeNames_[static_cast<int>(VisualizationMode::DebugPTCOnly)] = "DEBUG: PTC Base Only";
+    modeNames_[static_cast<int>(VisualizationMode::DebugNormals)] = "DEBUG: Normals";
+    modeNames_[static_cast<int>(VisualizationMode::DebugNdotL)] = "DEBUG: NdotL";
+    modeNames_[static_cast<int>(VisualizationMode::DebugLightingOnly)] = "DEBUG: Lighting Only";
+    modeNames_[static_cast<int>(VisualizationMode::DebugPTCLighting)] = "DEBUG: PTC x Light";
+    modeNames_[static_cast<int>(VisualizationMode::DebugDepth)] = "DEBUG: Depth";
+    modeNames_[static_cast<int>(VisualizationMode::DebugEDL)] = "DEBUG: EDL";
+    modeNames_[static_cast<int>(VisualizationMode::DebugAO)] = "DEBUG: AO";
 }
 
 void VisualizationManager::SetMode(VisualizationMode mode) {
@@ -110,6 +125,7 @@ void VisualizationManager::CreateDefaultPresets() {
     presets_.push_back({"Terrain Classification", VisualizationMode::Classification, 0.0f, 1.0f, 0.0f, 1000.0f, 0xFF00FF00, 0xFFFF0000});
     presets_.push_back({"Elevation Rainbow", VisualizationMode::Elevation, 0.0f, 1.0f, 0.0f, 1000.0f, 0xFF0000FF, 0xFFFF0000});
     presets_.push_back({"Height Ramp", VisualizationMode::HeightRamp, 0.0f, 1.0f, 0.0f, 1000.0f, 0xFF0000FF, 0xFFFF0000});
+    presets_.push_back({"PTC Composite", VisualizationMode::PTCComposite, 0.0f, 1.0f, 0.0f, 1000.0f, 0xFFFFFFFF, 0xFF0000FF});
 }
 
 void VisualizationManager::RenderUI(RenderContext& ctx) {
@@ -161,6 +177,22 @@ void VisualizationManager::RenderUI(RenderContext& ctx) {
         ImGui::SliderFloat("Shininess", &surfaceShininess_, 1.0f, 128.0f);
     }
 
+    // Expose lighting controls for PTC shaded modes (17-20)
+    if (currentMode_ == VisualizationMode::PTCShading ||
+        currentMode_ == VisualizationMode::PTCHillshade ||
+        currentMode_ == VisualizationMode::PTCEDL ||
+        currentMode_ == VisualizationMode::PTCComposite) {
+        ImGui::Text("Lighting:");
+        ImGui::SliderFloat("Ambient", &surfaceAmbient_, 0.0f, 1.0f);
+        ImGui::SliderFloat("Diffuse", &surfaceDiffuse_, 0.0f, 1.0f);
+        ImGui::SliderFloat("Specular", &surfaceSpecular_, 0.0f, 1.0f);
+        ImGui::SliderFloat("Shininess", &surfaceShininess_, 1.0f, 128.0f);
+        if (currentMode_ == VisualizationMode::PTCEDL ||
+            currentMode_ == VisualizationMode::PTCComposite) {
+            ImGui::SliderFloat("EDL Strength", &edlStrength_, 0.0f, 5.0f);
+        }
+    }
+
     if (currentMode_ == VisualizationMode::EyeDomeLighting) {
         ImGui::SliderFloat("EDL Strength", &edlStrength_, 0.0f, 5.0f);
     }
@@ -171,6 +203,37 @@ void VisualizationManager::RenderUI(RenderContext& ctx) {
         if (ImGui::Button(presets_[i].name.c_str())) {
             ApplyPreset(static_cast<uint32_t>(i));
         }
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Shading Presets:");
+    if (ImGui::Button("Natural LiDAR")) {
+        currentMode_ = VisualizationMode::PTCComposite;
+        surfaceAmbient_ = 0.25f; surfaceDiffuse_ = 0.75f;
+        surfaceSpecular_ = 0.10f; surfaceShininess_ = 24.0f;
+        edlStrength_ = 1.2f;
+    }
+    if (ImGui::Button("MicroStation Style")) {
+        currentMode_ = VisualizationMode::PTCComposite;
+        surfaceAmbient_ = 0.20f; surfaceDiffuse_ = 0.85f;
+        surfaceSpecular_ = 0.15f; surfaceShininess_ = 32.0f;
+        edlStrength_ = 1.5f;
+    }
+    if (ImGui::Button("Strong Relief")) {
+        currentMode_ = VisualizationMode::PTCComposite;
+        surfaceAmbient_ = 0.12f; surfaceDiffuse_ = 1.00f;
+        surfaceSpecular_ = 0.20f; surfaceShininess_ = 40.0f;
+        edlStrength_ = 2.0f;
+    }
+    if (ImGui::Button("Engineering")) {
+        currentMode_ = VisualizationMode::PTCComposite;
+        surfaceAmbient_ = 0.15f; surfaceDiffuse_ = 0.90f;
+        surfaceSpecular_ = 0.25f; surfaceShininess_ = 48.0f;
+        edlStrength_ = 1.8f;
+    }
+    if (ImGui::Button("PTC + EDL Only")) {
+        currentMode_ = VisualizationMode::PTCEDL;
+        edlStrength_ = 2.0f;
     }
 
     ImGui::Separator();

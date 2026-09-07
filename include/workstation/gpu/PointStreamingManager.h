@@ -10,6 +10,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <list>
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
@@ -111,6 +112,10 @@ private:
     pointcloud::PointCloud* activeCloud_ = nullptr;
     uint64_t currentFrame_ = 0;
 
+    // Flat map: nodeKey -> PointCloudNode* for node-specific decoding
+    std::unordered_map<uint64_t, pointcloud::PointCloudNode*> nodeKeyMap_;
+    void BuildNodeKeyMap(pointcloud::PointCloud* cloud);
+
     std::priority_queue<StreamingRequest> requestQueue_;
     std::unordered_map<uint64_t, StreamingRequest> activeRequests_;
     mutable std::mutex requestMutex_;
@@ -120,10 +125,18 @@ private:
     uint64_t cpuCacheLimit_ = 20ULL * 1024 * 1024 * 1024;
     mutable std::mutex cpuCacheMutex_;
 
+    // O(1) LRU: list (front=oldest, back=MRU) + map to iterator
+    std::list<uint64_t> cpuLruList_;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> cpuLruMap_;
+
     std::unordered_map<uint64_t, GPUResidentNode> gpuResidentNodes_;
     uint64_t gpuMemoryUsed_ = 0;
     uint64_t gpuMemoryLimit_ = 4ULL * 1024 * 1024 * 1024;
     mutable std::mutex gpuResidencyMutex_;
+
+    // O(1) LRU for GPU residency
+    std::list<uint64_t> gpuLruList_;
+    std::unordered_map<uint64_t, std::list<uint64_t>::iterator> gpuLruMap_;
 
     std::atomic<bool> stopDecodeThread_{false};
     std::thread decodeThread_;

@@ -22,12 +22,17 @@
 #include <QLineEdit>
 #include <QTextEdit>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QWidget>
 #include <QPushButton>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QDoubleSpinBox>
+#include <QGroupBox>
+#include <QRadioButton>
+#include <QButtonGroup>
+#include <QSlider>
 
 namespace workstation {
 namespace ui {
@@ -138,6 +143,11 @@ void MainWindow::buildMenu() {
     tgConsole->setChecked(true);
     connect(tgConsole, &QAction::toggled, this, &MainWindow::toggleCommandConsole);
 
+    viewMenu->addSeparator();
+    QAction* topViewAct = viewMenu->addAction("&Top View");
+    topViewAct->setShortcut(QKeySequence(Qt::Key_T));
+    connect(topViewAct, &QAction::triggered, m_viewport, &ViewportWindow::SetTopView);
+
     QMenu* toolsMenu = menuBar()->addMenu("&Tools");
 
     QMenu* attachMenu = toolsMenu->addMenu("&Attachments");
@@ -189,6 +199,26 @@ void MainWindow::buildMenu() {
     QAction* surfaceEdlAct = surfaceMenu->addAction("Eye &Dome Lighting");
     connect(surfaceEdlAct, &QAction::triggered, this, [this]() {
         if (m_viewport) m_viewport->SetSurfaceShading(3);
+    });
+
+    // MicroStation-style PTC surface shading: the PTC classification color
+    // stays as the base color; the shading layer only adds light/depth.
+    surfaceMenu->addSeparator();
+    QAction* surfacePtcPhongAct = surfaceMenu->addAction("PTC + &Phong");
+    connect(surfacePtcPhongAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) m_viewport->SetSurfaceShading(14);
+    });
+    QAction* surfacePtcHillAct = surfaceMenu->addAction("PTC + &Hillshade");
+    connect(surfacePtcHillAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) m_viewport->SetSurfaceShading(12);
+    });
+    QAction* surfacePtcEdlAct = surfaceMenu->addAction("PTC + E&DL");
+    connect(surfacePtcEdlAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) m_viewport->SetSurfaceShading(15);
+    });
+    QAction* surfacePtcCompositeAct = surfaceMenu->addAction("PTC &Composite");
+    connect(surfacePtcCompositeAct, &QAction::triggered, this, [this]() {
+        if (m_viewport) m_viewport->SetSurfaceShading(16);
     });
 
     surfaceMenu->addSeparator();
@@ -388,6 +418,33 @@ void MainWindow::buildMenu() {
         }
     });
 
+    // MicroStation-style PTC shading modes: the PTC classification colors
+    // (loaded from the ENEL .ptc file) remain the base color; the selected
+    // layer only adds lighting and depth. Values match VisualizationMode.
+    vizMenu->addSeparator();
+    QAction* ptcPhongAct = vizMenu->addAction("PTC + Phong (MicroStation)");
+    connect(ptcPhongAct, &QAction::triggered, this, [this]() {
+        onVisualizationModeSelected(17);
+    });
+    QAction* ptcHillAct = vizMenu->addAction("PTC + Hillshade");
+    connect(ptcHillAct, &QAction::triggered, this, [this]() {
+        onVisualizationModeSelected(18);
+    });
+    QAction* ptcEdlAct = vizMenu->addAction("PTC + EDL");
+    connect(ptcEdlAct, &QAction::triggered, this, [this]() {
+        onVisualizationModeSelected(19);
+    });
+    QAction* ptcCompositeAct = vizMenu->addAction("PTC Composite");
+    connect(ptcCompositeAct, &QAction::triggered, this, [this]() {
+        onVisualizationModeSelected(20);
+    });
+
+    vizMenu->addSeparator();
+    QAction* renderPanelAct = vizMenu->addAction("Rendering &Panel...");
+    connect(renderPanelAct, &QAction::triggered, this, [this]() {
+        showRenderingPanel();
+    });
+
     QMenu* helpMenu = menuBar()->addMenu("&Help");
     QAction* aboutAct = helpMenu->addAction("&About WorkstationCAD");
     connect(aboutAct, &QAction::triggered, this, &MainWindow::onAbout);
@@ -481,6 +538,222 @@ void MainWindow::onExit() {
 
 void MainWindow::onVisualizationModeSelected(int mode) {
     m_viewport->SetVisualizationMode(mode);
+}
+
+void MainWindow::showRenderingPanel() {
+    if (!m_viewport || !m_viewport->IsRendererReady()) {
+        QMessageBox::information(this, tr("Rendering Panel"),
+            tr("The renderer is not initialized yet. Load a point cloud first."));
+        return;
+    }
+
+    if (!m_renderPanel) {
+        m_renderPanel = new QDialog(this);
+        m_renderPanel->setWindowTitle(tr("Rendering - LiDAR Visualization"));
+        m_renderPanel->setModal(false);
+        auto* mainLay = new QVBoxLayout(m_renderPanel);
+
+        // ---- Color Source -------------------------------------------------
+        auto* srcBox = new QGroupBox(tr("Color Source"), m_renderPanel);
+        auto* srcLay = new QVBoxLayout(srcBox);
+        auto* rgbSrc   = new QRadioButton(tr("RGB"), srcBox);
+        auto* ptcSrc   = new QRadioButton(tr("PTC Classification"), srcBox);
+        auto* intSrc   = new QRadioButton(tr("Intensity"), srcBox);
+        auto* elevSrc  = new QRadioButton(tr("Elevation"), srcBox);
+        srcLay->addWidget(rgbSrc);
+        srcLay->addWidget(ptcSrc);
+        srcLay->addWidget(intSrc);
+        srcLay->addWidget(elevSrc);
+        ptcSrc->setChecked(true);
+        mainLay->addWidget(srcBox);
+
+        // ---- Shading Layer ------------------------------------------------
+        auto* shadeBox = new QGroupBox(tr("Shading"), m_renderPanel);
+        auto* shadeLay = new QVBoxLayout(shadeBox);
+        auto* flatSh  = new QRadioButton(tr("Flat"), shadeBox);
+        auto* phongSh = new QRadioButton(tr("Phong"), shadeBox);
+        auto* hillSh  = new QRadioButton(tr("Hillshade"), shadeBox);
+        auto* edlSh   = new QRadioButton(tr("Eye Dome Lighting (EDL)"), shadeBox);
+        auto* compSh  = new QRadioButton(tr("Composite (Phong + EDL + AO)"), shadeBox);
+        shadeLay->addWidget(flatSh);
+        shadeLay->addWidget(phongSh);
+        shadeLay->addWidget(hillSh);
+        shadeLay->addWidget(edlSh);
+        shadeLay->addWidget(compSh);
+        phongSh->setChecked(true);
+        mainLay->addWidget(shadeBox);
+
+        // ---- TEMPORARY: PTC color-loss isolation debug modes --------------
+        // A = palette lookup only, B = lighting only, C = product,
+        // D = raw classification ID on the red channel. Whichever of these
+        // first goes wrong pinpoints where the classification color is lost.
+        auto* dbgBox = new QGroupBox(
+            tr("Debug: PTC Color Loss Isolation (temporary)"), m_renderPanel);
+        auto* dbgLay = new QVBoxLayout(dbgBox);
+        auto* dbgBase  = new QRadioButton(tr("A: PTC base color only (mode 21)"), dbgBox);
+        auto* dbgLight = new QRadioButton(tr("B: Lighting factor only (mode 22)"), dbgBox);
+        auto* dbgProd  = new QRadioButton(tr("C: PTC x lighting (mode 23)"), dbgBox);
+        auto* dbgIds   = new QRadioButton(tr("D: Classification ID red map (mode 24)"), dbgBox);
+        dbgLay->addWidget(dbgBase);
+        dbgLay->addWidget(dbgLight);
+        dbgLay->addWidget(dbgProd);
+        dbgLay->addWidget(dbgIds);
+        auto* dbgGroup = new QButtonGroup(m_renderPanel);
+        dbgGroup->addButton(dbgBase);
+        dbgGroup->addButton(dbgLight);
+        dbgGroup->addButton(dbgProd);
+        dbgGroup->addButton(dbgIds);
+        dbgGroup->setExclusive(true);
+        connect(dbgBase,  &QRadioButton::toggled, this,
+                [this](bool on) { if (on) onVisualizationModeSelected(21); });
+        connect(dbgLight, &QRadioButton::toggled, this,
+                [this](bool on) { if (on) onVisualizationModeSelected(22); });
+        connect(dbgProd,  &QRadioButton::toggled, this,
+                [this](bool on) { if (on) onVisualizationModeSelected(23); });
+        connect(dbgIds,   &QRadioButton::toggled, this,
+                [this](bool on) { if (on) onVisualizationModeSelected(24); });
+        mainLay->addWidget(dbgBox);
+
+        applyRenderingPanelState(m_renderPanel, rgbSrc, ptcSrc, intSrc, elevSrc,
+                                 flatSh, phongSh, hillSh, edlSh, compSh);
+    }
+
+    m_renderPanel->show();
+    m_renderPanel->raise();
+    m_renderPanel->activateWindow();
+}
+
+void MainWindow::applyRenderingPanelState(QDialog* panel,
+                                          QRadioButton* rgbSrc, QRadioButton* ptcSrc,
+                                          QRadioButton* intSrc, QRadioButton* elevSrc,
+                                          QRadioButton* flatSh, QRadioButton* phongSh,
+                                          QRadioButton* hillSh, QRadioButton* edlSh,
+                                          QRadioButton* compSh) {
+    auto* mainLay = qobject_cast<QVBoxLayout*>(panel->layout());
+    if (!mainLay) return;
+
+    // ---- Parameters ---------------------------------------------------
+    auto* paramBox = new QGroupBox(tr("Parameters"), panel);
+    auto* paramLay = new QFormLayout(paramBox);
+    auto makeSlider = [panel](int minV, int maxV, int value) {
+        auto* s = new QSlider(Qt::Horizontal, panel);
+        s->setRange(minV, maxV);
+        s->setValue(value);
+        return s;
+    };
+    auto* ambientSlider   = makeSlider(0, 100, 20);   // 0.0 - 1.0
+    auto* diffuseSlider   = makeSlider(0, 100, 70);   // 0.0 - 1.0
+    auto* specularSlider  = makeSlider(0, 50, 30);    // 0.0 - 0.5
+    auto* edlSlider       = makeSlider(0, 50, 10);    // 0.0 - 5.0
+    auto* azimuthSlider   = makeSlider(0, 360, 45);   // 0 - 360 deg
+    auto* elevAngleSlider = makeSlider(0, 90, 60);    // 0 - 90 deg
+    auto* ambientLabel    = new QLabel(QString::number(0.20, 'f', 2), panel);
+    auto* diffuseLabel    = new QLabel(QString::number(0.70, 'f', 2), panel);
+    auto* specularLabel   = new QLabel(QString::number(0.30, 'f', 2), panel);
+    auto* edlLabel        = new QLabel(QString::number(1.0, 'f', 1), panel);
+    auto* azimuthLabel    = new QLabel(QString::number(45) + QChar(0x00B0), panel);
+    auto* elevAngleLabel  = new QLabel(QString::number(60) + QChar(0x00B0), panel);
+    auto sliderRow = [&](const QString& title, QSlider* s, QLabel* l) {
+        auto* row = new QHBoxLayout();
+        row->addWidget(new QLabel(title, panel));
+        row->addWidget(s, 1);
+        row->addWidget(l);
+        auto* holder = new QWidget(panel);
+        holder->setLayout(row);
+        paramLay->addRow(holder);
+    };
+    sliderRow(tr("Ambient"), ambientSlider, ambientLabel);
+    sliderRow(tr("Diffuse"), diffuseSlider, diffuseLabel);
+    sliderRow(tr("Specular"), specularSlider, specularLabel);
+    sliderRow(tr("EDL Strength"), edlSlider, edlLabel);
+    sliderRow(tr("Light Azimuth"), azimuthSlider, azimuthLabel);
+    sliderRow(tr("Light Elevation"), elevAngleSlider, elevAngleLabel);
+    mainLay->addWidget(paramBox);
+
+    auto* hint = new QLabel(
+        tr("All changes apply instantly (push-constant only - no mesh regeneration)."),
+        panel);
+    hint->setWordWrap(true);
+    mainLay->addWidget(hint);
+
+    // ---- Behaviour ----------------------------------------------------
+    // (colorSource, shadingLayer) -> point cloud VisualizationMode.
+    // The PTC row is the full MicroStation pipeline (dedicated shader modes);
+    // other color sources reuse their closest existing shaded mode.
+    auto applyMode = [=, this]() {
+        int shading = flatSh->isChecked() ? 0
+                    : phongSh->isChecked() ? 1
+                    : hillSh->isChecked() ? 2
+                    : edlSh->isChecked() ? 3 : 4;
+        int mode;
+        int surfaceShading;
+        if (ptcSrc->isChecked()) {
+            static const int kModes[5]        = {15, 17, 18, 19, 20};
+            static const int kSurfaceModes[5] = {11, 14, 12, 15, 16};
+            mode = kModes[shading];
+            surfaceShading = kSurfaceModes[shading];
+        } else if (rgbSrc->isChecked()) {
+            static const int kModes[5] = {0, 5, 5, 14, 13};
+            mode = kModes[shading];
+            surfaceShading = -1;
+        } else if (intSrc->isChecked()) {
+            static const int kModes[5] = {1, 5, 5, 14, 13};
+            mode = kModes[shading];
+            surfaceShading = -1;
+        } else {
+            static const int kModes[5] = {3, 5, 5, 14, 13};
+            mode = kModes[shading];
+            surfaceShading = -1;
+        }
+        m_viewport->SetVisualizationMode(mode);
+        // Keep an existing shaded surface in sync with the chosen look
+        // (never force-generates one - see SetSurfaceShadingIfPresent).
+        if (surfaceShading >= 0) {
+            m_viewport->SetSurfaceShadingIfPresent(surfaceShading);
+        }
+    };
+    for (auto* btn : {rgbSrc, ptcSrc, intSrc, elevSrc,
+                      flatSh, phongSh, hillSh, edlSh, compSh}) {
+        connect(btn, &QRadioButton::toggled, this, applyMode);
+    }
+
+    auto applyMaterial = [=, this]() {
+        m_viewport->SetShadingParams(
+            ambientSlider->value() / 100.0f,
+            diffuseSlider->value() / 100.0f,
+            specularSlider->value() / 100.0f,
+            32.0f);
+    };
+    connect(ambientSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        ambientLabel->setText(QString::number(v / 100.0, 'f', 2));
+        applyMaterial();
+    });
+    connect(diffuseSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        diffuseLabel->setText(QString::number(v / 100.0, 'f', 2));
+        applyMaterial();
+    });
+    connect(specularSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        specularLabel->setText(QString::number(v / 100.0, 'f', 2));
+        applyMaterial();
+    });
+    connect(edlSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        edlLabel->setText(QString::number(v / 10.0, 'f', 1));
+        m_viewport->SetEDLStrength(v / 10.0f);
+    });
+    connect(azimuthSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        azimuthLabel->setText(QString::number(v) + QChar(0x00B0));
+        m_viewport->SetSunAngles(static_cast<float>(v),
+                                 static_cast<float>(elevAngleSlider->value()));
+    });
+    connect(elevAngleSlider, &QSlider::valueChanged, this, [=, this](int v) {
+        elevAngleLabel->setText(QString::number(v) + QChar(0x00B0));
+        m_viewport->SetSunAngles(static_cast<float>(azimuthSlider->value()),
+                                 static_cast<float>(v));
+    });
+
+    // Apply the default (PTC + Phong) selection once on creation.
+    applyMode();
+    applyMaterial();
 }
 
 void MainWindow::onOpenFile() {

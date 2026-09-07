@@ -26,7 +26,7 @@ void main() {
     vec4 pos = vec4(inPosition, 1.0);
     vec4 viewPos = viewProjection * pos;
     gl_Position = viewPos;
-    float h = clamp((inPosition.y - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
+    float h = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
     vertColor = vec4(vec3(h), 1.0);
     vertDepth = viewPos.w;
     float dist = length(pos.xyz - cameraPosition.xyz);

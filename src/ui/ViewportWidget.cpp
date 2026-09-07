@@ -14,7 +14,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
+#include <set>
 
 #include <QExposeEvent>
 #include <QResizeEvent>
@@ -87,7 +89,7 @@ bool ViewportWindow::InitializeRenderer() {
     if (m_cloud && m_cloud->Root()) {
         m_renderer->SetPointCloud(m_cloud.get());
         auto bounds = m_cloud->Root()->bounds();
-        cam.FocusOnBounds(bounds);
+        cam.SetTopView(bounds);
 
         auto& cfg = m_renderer->GetContext().GetConfig();
         // LAS/LiDAR source data is Z-up (Z = true elevation); see the
@@ -113,7 +115,49 @@ bool ViewportWindow::LoadPointCloudFile(const QString& path, QString* errorMessa
         m_renderer->SetPointCloud(m_cloud.get());
         auto bounds = m_cloud->Root() ? m_cloud->Root()->bounds() : pointcloud::BoundingBox{};
         auto& cam = m_renderer->GetContext().GetCamera();
-        cam.FocusOnBounds(bounds);
+        cam.SetTopView(bounds);
+
+        // -------------------------------------------------------------------
+        // TOP VIEW DEBUG
+        // -------------------------------------------------------------------
+        auto pos = cam.GetPosition();
+        auto tgt = cam.GetTarget();
+        auto fwd = cam.GetForward();
+        auto right = cam.GetRight();
+        auto up = cam.GetUp();
+        fprintf(stderr,
+            "\n[TOP VIEW DEBUG]\n"
+            "  Bounds:\n"
+            "    minX: %.3f maxX: %.3f\n"
+            "    minY: %.3f maxY: %.3f\n"
+            "    minZ: %.3f maxZ: %.3f\n"
+            "  Camera:\n"
+            "    position: (%.3f, %.3f, %.3f)\n"
+            "    target:   (%.3f, %.3f, %.3f)\n"
+            "    forward:  (%.4f, %.4f, %.4f)\n"
+            "    right:    (%.4f, %.4f, %.4f)\n"
+            "    up:       (%.4f, %.4f, %.4f)\n"
+            "    worldUp:  (%.4f, %.4f, %.4f)\n"
+            "    yaw=%.2f pitch=%.2f\n"
+            "  Projection:\n"
+            "    type: Orthographic\n"
+            "    left: %.3f right: %.3f bottom: %.3f top: %.3f\n"
+            "    near: %.3f far: %.3f\n",
+            bounds.minX, bounds.maxX,
+            bounds.minY, bounds.maxY,
+            bounds.minZ, bounds.maxZ,
+            pos.x, pos.y, pos.z,
+            tgt.x, tgt.y, tgt.z,
+            fwd.x, fwd.y, fwd.z,
+            right.x, right.y, right.z,
+            up.x, up.y, up.z,
+            cam.GetWorldUp().x, cam.GetWorldUp().y, cam.GetWorldUp().z,
+            cam.GetYaw(), cam.GetPitch(),
+            cam.GetOrthoLeft(), cam.GetOrthoRight(),
+            cam.GetOrthoBottom(), cam.GetOrthoTop(),
+            cam.GetNearClip(), cam.GetFarClip());
+        fflush(stderr);
+        // -------------------------------------------------------------------
 
         auto& cfg = m_renderer->GetContext().GetConfig();
         // LAS/LiDAR source data is Z-up (Z = true elevation); see the
@@ -154,8 +198,12 @@ void ViewportWindow::SetVisualizationMode(int mode) {
     // cloud), so every point gets the *same* lighting dot product regardless
     // of the surface it's actually on - a flat, uniformly dim result that
     // reads as a featureless dark/black cloud instead of real shading.
+    // The MicroStation-style PTC shading modes (17-20) light the cloud the
+    // same way, so they need real normals too.
+    const uint32_t m = static_cast<uint32_t>(mode);
     bool needsNormals = (vmode == renderer::VisualizationMode::NormalShading ||
-                          vmode == renderer::VisualizationMode::SurfaceShading);
+                          vmode == renderer::VisualizationMode::SurfaceShading ||
+                          (m >= 17u && m <= 24u));
     if (needsNormals && m_cloud && m_cloud->Root()) {
         auto* root = m_cloud->Root();
         if (!root->channels().GetChannel(pointcloud::ChannelId::Normals)) {
@@ -183,6 +231,37 @@ void ViewportWindow::SetVisualizationMode(int mode) {
     }
 
     m_renderer->GetContext().GetConfig().visualizationMode = vmode;
+
+    // TEMPORARY DEBUG (PTC color-loss investigation): print the classification
+    // IDs that will reach the shader for this cloud, plus normals state, once
+    // per PTC mode selection. Satisfies "print first 20 unique classification
+    // IDs reaching the shader" from the debug protocol (CPU-side view of the
+    // exact attribute buffer the GPU reads).
+    const uint32_t dbg = static_cast<uint32_t>(mode);
+    if (dbg >= 17u && dbg <= 24u && m_cloud && m_cloud->Root()) {
+        auto& channels = m_cloud->Root()->channels();
+        auto* clsCh = channels.GetChannel(pointcloud::ChannelId::Classification);
+        auto* nrmCh = channels.GetChannel(pointcloud::ChannelId::Normals);
+        fprintf(stderr, "[PTC-DEBUG] mode=%u classificationChannel=%s normalsChannel=%s",
+                dbg,
+                (clsCh && clsCh->Data()) ? "yes" : "MISSING",
+                (nrmCh && nrmCh->Data()) ? "yes" : "no");
+        if (nrmCh && nrmCh->Data() && nrmCh->Count() >= 3) {
+            const float* fn = reinterpret_cast<const float*>(nrmCh->Data());
+            fprintf(stderr, " normal[0]=(%.3f,%.3f,%.3f)", fn[0], fn[1], fn[2]);
+        }
+        if (clsCh && clsCh->Data()) {
+            std::set<int> uniq;  // first 20 unique IDs in buffer order
+            const uint8_t* d = clsCh->Data();
+            const size_t n = clsCh->Count();
+            for (size_t i = 0; i < n && uniq.size() < 20; ++i) uniq.insert(d[i]);
+            fprintf(stderr, " uniqueClassIDs(first20)=[");
+            for (int v : uniq) fprintf(stderr, " %d", v);
+            fprintf(stderr, " ] count=%zu", n);
+        }
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
 }
 
 quint64 ViewportWindow::GetLoadedPointCount() const {
@@ -266,6 +345,10 @@ void ViewportWindow::ApplyHeldKeyMovement(float dt) {
 }
 
 void ViewportWindow::keyPressEvent(QKeyEvent* event) {
+    if (event->key() == Qt::Key_T && !event->isAutoRepeat()) {
+        SetTopView();
+        return;
+    }
     m_heldKeys.insert(event->key());
 }
 
@@ -400,6 +483,14 @@ void ViewportWindow::FocusCameraOnLastCadAttachment() {
     cam.FocusOnBounds(combined);
 }
 
+void ViewportWindow::SetTopView() {
+    if (!m_rendererInitialized) return;
+    auto& cam = m_renderer->GetContext().GetCamera();
+    if (m_cloud && m_cloud->Root()) {
+        cam.SetTopView(m_cloud->Root()->bounds());
+    }
+}
+
 void ViewportWindow::RemoveCadAttachment(cad::DxfAttachment* attachment) {
     if (m_rendererInitialized) m_renderer->RemoveDxfAttachment(attachment);
 }
@@ -526,7 +617,8 @@ void ViewportWindow::GenerateSurfaceForCloud() {
 
     surface::ElevationGridParams params;
     params.resolution = 256;
-    params.sourceMode = surface::ElevationSourceMode::AllPoints;
+    // GroundOnly for DTM/hillshade - prevents vegetation/building spikes
+    params.sourceMode = surface::ElevationSourceMode::GroundOnly;
 
     // Stage 1: Instant low-res display (256x256, ~1ms)
     auto* lod0 = elevationCache_.GetOrCreate(cloudID, *m_cloud, params);
@@ -626,9 +718,50 @@ void ViewportWindow::SetSurfaceNeighborRadius(double radius) {
 void ViewportWindow::SetSurfaceLightDirection(float x, float y, float z) {
     if (!m_rendererInitialized || !m_renderer) return;
     auto& cfg = m_renderer->GetContext().GetConfig();
+    // Derive the canonical azimuth/elevation form from the raw direction so
+    // the point pipeline (which now reads the angles) and the surface
+    // pipeline stay in agreement no matter which dialog was used.
+    float len = std::sqrt(x * x + y * y + z * z);
+    if (len < 1e-5f) return;
+    x /= len; y /= len; z /= len;
+    constexpr float kPi = 3.14159265f;
+    float elev = std::asin(std::clamp(z, -1.0f, 1.0f));
+    float azim = std::atan2(y, x);
+    if (azim < 0.0f) azim += 2.0f * kPi;
+    cfg.lightAzimuthDeg = azim * 180.0f / kPi;
+    cfg.lightElevationDeg = std::clamp(elev * 180.0f / kPi, 0.0f, 90.0f);
+    // Keep the legacy XYZ mirror in sync for any existing consumers.
     cfg.surfaceLightDirX = x;
     cfg.surfaceLightDirY = y;
     cfg.surfaceLightDirZ = z;
+}
+
+void ViewportWindow::SetShadingParams(float ambient, float diffuse,
+                                      float specular, float shininess) {
+    if (!m_rendererInitialized || !m_renderer) return;
+    auto& cfg = m_renderer->GetContext().GetConfig();
+    cfg.surfaceAmbient = ambient;
+    cfg.surfaceDiffuse = diffuse;
+    cfg.surfaceSpecular = specular;
+    cfg.surfaceShininess = shininess;
+}
+
+void ViewportWindow::SetEDLStrength(float strength) {
+    if (!m_rendererInitialized || !m_renderer) return;
+    m_renderer->GetContext().GetConfig().edlStrength = strength;
+}
+
+void ViewportWindow::SetSunAngles(float azimuthDeg, float elevationDeg) {
+    if (!m_rendererInitialized || !m_renderer) return;
+    auto& cfg = m_renderer->GetContext().GetConfig();
+    cfg.lightAzimuthDeg = std::clamp(azimuthDeg, 0.0f, 360.0f);
+    cfg.lightElevationDeg = std::clamp(elevationDeg, 0.0f, 90.0f);
+}
+
+void ViewportWindow::SetSurfaceShadingIfPresent(int shading) {
+    auto* sr = GetSurfaceRenderer();
+    if (!sr || sr->GetMeshCount() == 0) return;
+    sr->SetShading(static_cast<surface::ShadingType>(shading));
 }
 
 void ViewportWindow::SetSurfaceMaterial(float ambient, float diffuse,

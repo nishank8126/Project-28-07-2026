@@ -54,19 +54,31 @@ public:
     math::Point3d GetUp() const;
 
     double GetFOV() const { return fovY_; }
+    double GetFovY() const { return fovY_; }
     double GetAspectRatio() const { return aspectRatio_; }
     double GetNearClip() const { return nearClip_; }
     double GetFarClip() const { return farClip_; }
     CameraProjection GetProjectionType() const { return projectionType_; }
+    math::Point3d GetWorldUp() const { return worldUp_; }
+    double GetYaw() const { return yaw_; }
+    double GetPitch() const { return pitch_; }
+    double GetOrthoLeft() const { return orthoLeft_; }
+    double GetOrthoRight() const { return orthoRight_; }
+    double GetOrthoBottom() const { return orthoBottom_; }
+    double GetOrthoTop() const { return orthoTop_; }
 
     void Invalidate() { dirty_ = true; }
 
     void FocusOnBounds(const spatial::BoundingBox& bounds, double padding = 1.5);
 
+    // Top/Plan view: camera directly above, looking straight down (-Z),
+    // orthographic projection fitted to XY footprint.
+    void SetTopView(const spatial::BoundingBox& bounds, double padding = 1.1);
+
 private:
     math::Point3d position_ = {0, 0, 5};
     math::Point3d target_ = {0, 0, 0};
-    math::Point3d worldUp_ = {0, 1, 0};
+    math::Point3d worldUp_ = {0, 0, 1}; // Z-up: matches LiDAR/CAD convention
 
     double yaw_ = -90.0;
     double pitch_ = 0.0;

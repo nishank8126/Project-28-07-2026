@@ -23,8 +23,33 @@ layout(location = 0) out vec4 outColor;
 vec3 applyPhong(vec3 normal, vec3 lightDir, vec3 /*viewDir*/, vec3 color) {
     float ambientFloor = fragMaterial.x;
     float NdotL = max(dot(normal, lightDir), 0.0);
-    float shade = max(NdotL, ambientFloor);
+    // Contrast curve: push dark slopes deeper while keeping illuminated faces bright.
+    // Remap [0,1] -> [0,1] with a smooth S-curve that darkens mid-tones.
+    float t = max(NdotL - ambientFloor, 0.0) / max(1.0 - ambientFloor, 0.001);
+    float shade = ambientFloor + (1.0 - ambientFloor) * t * t * (3.0 - 2.0 * t);
     return color * shade;
+}
+
+// Full Blinn-Phong: ambient + diffuse + specular, driven by the user's
+// material weights (fragMaterial = ambient/diffuse/specular/shininess).
+// Used by the MicroStation-style PTC modes so the base classification color
+// is lit rather than replaced.
+vec3 applyBlinnPhong(vec3 normal, vec3 lightDir, vec3 viewDir, vec3 color) {
+    float ambient = fragMaterial.x;
+    float diffuse = fragMaterial.y;
+    float specular = fragMaterial.z;
+    float shininess = max(fragMaterial.w, 1.0);
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    // Same contrast curve as applyPhong for consistent terrain relief
+    float t = max(NdotL - ambient, 0.0) / max(1.0 - ambient, 0.001);
+    float diffContrib = t * t * (3.0 - 2.0 * t);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float NdotH = max(dot(normal, halfDir), 0.0);
+    // Slightly tint specular by base color for more natural appearance
+    // instead of pure white wash-out
+    vec3 specColor = mix(vec3(1.0), color, 0.15);
+    vec3 spec = specColor * pow(NdotH, shininess) * specular;
+    return color * (ambient + diffuse * diffContrib) + spec;
 }
 
 vec3 applyDepthShading(vec3 color, float depth) {
@@ -46,8 +71,10 @@ vec3 applyEDL(vec3 color, vec3 normal, vec3 viewDir) {
     float depthDiscontinuity = clamp(fwidth(fragDepth) * edlStrength * 50.0, 0.0, 1.0);
     // Silhouette term: surfaces seen edge-on change normal rapidly too.
     float normalTerm = 1.0 - max(dot(normal, viewDir), 0.0);
-    float edgeFactor = clamp(normalTerm * 0.5 + depthDiscontinuity * 0.5, 0.0, 1.0);
-    return color * (1.0 - edgeFactor * edlStrength * 0.5);
+    // Stronger depth contrast: bias toward edge darkening for better
+    // terrain crevice and building edge separation
+    float edgeFactor = clamp(normalTerm * 0.6 + depthDiscontinuity * 0.6, 0.0, 1.0);
+    return color * (1.0 - edgeFactor * edlStrength * 0.6);
 }
 
 // Elevation colormap: 5-stop professional terrain ramp
@@ -79,13 +106,42 @@ vec3 ComputeNormalFromPosition(vec3 wp, vec3 vertexNormal) {
     return n / len;
 }
 
+// Check if the vertex normal is the ElevationGrid placeholder (0,0,1)
+// ElevationGrid sets placeholder normals to (0,0,1) while SurfaceMeshGenerator
+// creates proper flat face normals via FlattenFaceNormals.
+bool IsPlaceholderNormal(vec3 n) {
+    return abs(n.x) < 1e-4 && abs(n.y) < 1e-4 && abs(n.z - 1.0) < 1e-4;
+}
+
 // Classification color storage buffer: 256 × vec4 (RGBA).
 // Alpha = 0 means the class is hidden. Shared with point shader.
 layout(std430, set = 0, binding = 0) readonly buffer ClassificationColors {
     vec4 classificationColors[256];
 };
 
-// MicroStation/ArcGIS-style hillshade: a single directional light, no
+// ---------------------------------------------------------------------------
+// Unified Material Color Pipeline -- GetBaseColor()
+// ---------------------------------------------------------------------------
+// Single color-source lookup shared by every PTC shading mode: the
+// classification ID (loaded from the ENEL PTC file) indexes the SAME
+// classification SSBO the point shader reads -- no duplicated palette, no
+// baked colors. Hidden classes (alpha == 0) fall back to neutral grey so a
+// shading mode never resurrects a class the user hid.
+vec3 GetBaseColor() {
+    int cls = clamp(int(fragClassificationID), 0, 255);
+    vec4 col = classificationColors[cls];
+    return (col.a < 0.01) ? vec3(0.5) : col.rgb;
+}
+
+// Forward declarations for debug functions (defined after main)
+vec3 DebugPTCOnly();
+vec3 DebugNormals();
+vec3 DebugNdotL(vec3 N, vec3 L);
+vec3 DebugLightingOnly(vec3 N, vec3 L, vec3 V, vec3 color);
+vec3 DebugPTCLighting(vec3 N, vec3 L, vec3 V);
+vec3 DebugDepth();
+vec3 DebugEDL(vec3 N, vec3 V);
+vec3 DebugAO(vec3 N);
 
 void main() {
     vec3 N = normalize(fragNormal);
@@ -151,27 +207,12 @@ void main() {
         color = applyPhong(N2, L, V, ElevationColormap(h));
         color = applyEDL(color, N2, V);
     } else if (mode < 11.5) {
-        // PTC Classification: lookup classification ID in palette
-        int cls = int(fragClassificationID);
-        cls = clamp(cls, 0, 255);
-        vec4 col = classificationColors[cls];
-        // If alpha is 0, class is hidden - use grey
-        if (col.a < 0.01) {
-            color = vec3(0.5);
-        } else {
-            color = col.rgb;
-        }
+        // PTC Classification: flat PTC palette colors (base color only)
+        color = GetBaseColor();
     } else if (mode < 12.5) {
-        // PTC Hillshade: PTC color + Phong lighting
-        int cls = int(fragClassificationID);
-        cls = clamp(cls, 0, 255);
-        vec4 col = classificationColors[cls];
-        if (col.a < 0.01) {
-            color = vec3(0.5);
-        } else {
-            vec3 N2 = ComputeNormalFromPosition(fragWorldPos, N);
-            color = applyPhong(N2, L, V, col.rgb);
-        }
+        // PTC Hillshade: PTC base color + terrain relief lighting
+        color = applyPhong(ComputeNormalFromPosition(fragWorldPos, N), L, V,
+                           GetBaseColor());
     } else if (mode < 13.5) {
         // Elevation + PTC Composite: elevation heatmap + PTC tint
         float elevMin = fragShadingParams.y;
@@ -188,10 +229,88 @@ void main() {
         if (col.a >= 0.01) {
             color = color * col.rgb;
         }
+    } else if (mode < 14.5) {
+        // PTC Shading (MicroStation-style): PTC classification color stays as
+        // the base color; Phong lighting adds depth, lighting and relief on
+        // top. The classification hue is NEVER replaced by grey/material.
+        // Use vertex normal directly for SurfaceMeshGenerator (flat face normals
+        // from FlattenFaceNormals), fall back to derivative normal for ElevationGrid.
+        vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
+        color = applyBlinnPhong(N2, L, V, GetBaseColor());
+    } else if (mode < 15.5) {
+        // PTC + EDL: PTC base color + eye-dome lighting edge darkening.
+        // Improves pole separation, cable visibility and building edges
+        // without shifting the palette hue.
+        vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
+        color = applyEDL(GetBaseColor(), N2, V);
+    } else if (mode < 16.5) {
+        // PTC Composite (MicroStation/TerraScan look):
+        // PTC color + Phong + EDL + ambient-occlusion-style depth.
+        vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
+        color = applyBlinnPhong(N2, L, V, GetBaseColor());
+        color = applyEDL(color, N2, V);
+        // AO-style crevice darkening: where the faceted geometry normal
+        // swings sharply between neighbouring fragments, the surface is
+        // concave (pole/ground joints, cable attachment points) -- darken
+        // those crevices for grounded, occluded depth cues.
+        float crevice = clamp(length(fwidth(N2)) * 2.0, 0.0, 1.0);
+        color *= mix(1.0, 0.55, crevice);
+    } else if (mode < 17.5) {
+        // DEBUG 1: PTC only (base classification color)
+        color = DebugPTCOnly();
+    } else if (mode < 18.5) {
+        // DEBUG 2: Normals (visualize vertex/face normals)
+        color = DebugNormals();
+    } else if (mode < 19.5) {
+        // DEBUG 3: NdotL (diffuse lighting factor)
+        color = DebugNdotL(N, L);
+    } else if (mode < 20.5) {
+        // DEBUG 4: Lighting only (Phong on white)
+        color = DebugLightingOnly(N, L, V, vec3(1.0));
+    } else if (mode < 21.5) {
+        // DEBUG 5: PTC x Lighting (PTC color with Phong)
+        color = DebugPTCLighting(N, L, V);
+    } else if (mode < 22.5) {
+        // DEBUG 6: Depth
+        color = DebugDepth();
+    } else if (mode < 23.5) {
+        // DEBUG 7: EDL
+        color = DebugEDL(N, V);
+    } else if (mode < 24.5) {
+        // DEBUG 8: AO (crevice darkening)
+        color = DebugAO(N);
     } else {
         color = fragColor;
     }
 
     // Alpha from push constants supports Hybrid mode (surface over points).
     outColor = vec4(color, fragAlpha);
+}
+
+// ---------------------------------------------------------------------------
+// Debug mode implementations (must be after all helper functions)
+// ---------------------------------------------------------------------------
+vec3 DebugPTCOnly() { return GetBaseColor(); }
+vec3 DebugNormals() { return normalize(fragNormal) * 0.5 + 0.5; }
+vec3 DebugNdotL(vec3 N, vec3 L) {
+    float ndotl = max(dot(N, L), 0.0);
+    return vec3(ndotl);
+}
+vec3 DebugLightingOnly(vec3 N, vec3 L, vec3 V, vec3 color) {
+    return applyBlinnPhong(N, L, V, color);
+}
+vec3 DebugPTCLighting(vec3 N, vec3 L, vec3 V) {
+    return applyBlinnPhong(N, L, V, GetBaseColor());
+}
+vec3 DebugDepth() {
+    float t = clamp((fragWorldPos.z - fragShadingParams.y) /
+                     (fragShadingParams.z - fragShadingParams.y + 0.001), 0.0, 1.0);
+    return vec3(t);
+}
+vec3 DebugEDL(vec3 N, vec3 V) {
+    return applyEDL(vec3(1.0), N, V);
+}
+vec3 DebugAO(vec3 N) {
+    float crevice = clamp(length(fwidth(N)) * 2.0, 0.0, 1.0);
+    return vec3(1.0 - crevice * 0.5);
 }

@@ -17,6 +17,9 @@ layout(push_constant) uniform CullPushConstants {
     uint totalPoints;
     uint outputOffset;
     float pointSize;
+    uint maxOutputPoints;      // Screen-space LOD: max points to output this frame
+    float viewportHeight;      // For screen-space error calculation
+    float tanHalfFov;          // For screen-space error calculation
     uint padding0;
 };
 
@@ -36,6 +39,7 @@ layout(binding = 2, set = 0) buffer DrawIndirectArgs {
 };
 
 shared uint sharedCount;
+shared uint globalOutputCount;
 
 bool TestPointInFrustum(vec4 pos) {
     for (int i = 0; i < 6; i++) {
@@ -46,9 +50,28 @@ bool TestPointInFrustum(vec4 pos) {
     return true;
 }
 
+float CalculateScreenSpaceError(vec4 worldPos) {
+    // Compute clip-space position
+    vec4 clipPos = viewProjection * worldPos;
+    float w = clipPos.w;
+    if (w <= 0.0) return 1e6; // Behind camera or at infinity
+
+    // Screen-space error in pixels
+    float z = clipPos.z / w;  // NDC Z
+    float invW = 1.0 / w;
+    
+    // Approximate screen-space error based on point size and distance
+    // error = pointSize * viewportHeight * invW / 2
+    float error = pointSize * viewportHeight * invW * 0.5;
+    
+    // Clamp to reasonable range
+    return clamp(error, 0.1, 100.0);
+}
+
 void main() {
     if (gl_LocalInvocationIndex == 0) {
         sharedCount = 0;
+        globalOutputCount = 0;
     }
     barrier();
 
@@ -56,13 +79,35 @@ void main() {
     if (idx >= totalPoints) return;
 
     vec4 pos = inputPoints[idx].position;
-    if (TestPointInFrustum(pos)) {
-        uint localIdx;
-        atomicAdd(sharedCount, 1);
-        memoryBarrierShared();
-        localIdx = sharedCount - 1;
-        outputPoints[outputOffset + localIdx] = inputPoints[idx];
+    
+    // Frustum culling
+    if (!TestPointInFrustum(pos)) return;
+    
+    // Screen-space LOD: compute screen-space error
+    float sse = CalculateScreenSpaceError(pos);
+    
+    // Adaptive LOD threshold based on distance
+    // Farther points = higher allowed error = more aggressive culling
+    float lodThreshold = 1.0 + sse * 0.1;
+    
+    // Random value for stochastic LOD (consistent per point via hash)
+    uint hash = idx * 1664525u + 1013904223u;
+    hash ^= hash >> 13;
+    hash *= 1664525u;
+    hash ^= hash >> 13;
+    float randVal = float(hash & 0xFFFFFF) / float(0xFFFFFF);
+    
+    // Stochastic LOD: points with higher SSE are more likely to be culled
+    if (randVal > 1.0 / lodThreshold) return;
+    
+    // Global point budget enforcement
+    if (maxOutputPoints > 0) {
+        uint globalIdx = atomicAdd(globalOutputCount, 1);
+        if (globalIdx >= maxOutputPoints) return;
     }
+
+    uint localIdx = atomicAdd(sharedCount, 1);
+    outputPoints[outputOffset + localIdx] = inputPoints[idx];
 
     barrier();
     if (gl_LocalInvocationIndex == 0) {

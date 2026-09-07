@@ -208,6 +208,10 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreateCadLinePipeline failed\n");
         return false;
     }
+    if (!CreateComputePipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreateComputePipeline failed (non-fatal)\n");
+        // Non-fatal: compute culling is optional, CPU path continues to work
+    }
 
     cadRenderer_.Initialize(&vulkan::VulkanAllocator::Get());
     cadRenderer_.SetCoordinateNormalizer(&coordNormalizer_);
@@ -260,12 +264,31 @@ void Renderer::Shutdown() {
     if (pointPipeline_) pipelineManager_->DestroyPipeline(pointPipeline_);
     if (debugPipeline_) pipelineManager_->DestroyPipeline(debugPipeline_);
     if (linePipeline_) pipelineManager_->DestroyPipeline(linePipeline_);
+    if (cullingComputePipeline_) pipelineManager_->DestroyPipeline(cullingComputePipeline_);
     if (pointPipelineLayout_) pipelineManager_->DestroyPipelineLayout(pointPipelineLayout_);
+    if (cullingComputePipelineLayout_) pipelineManager_->DestroyPipelineLayout(cullingComputePipelineLayout_);
     if (overlayVertexBuffer_.IsValid()) {
         vulkan::VulkanAllocator::Get().DestroyBuffer(overlayVertexBuffer_);
     }
     if (pointDescriptorLayout_) descriptorManager_->DestroyLayout(pointDescriptorLayout_);
     if (pointDescriptorPool_) descriptorManager_->DestroyPool(pointDescriptorPool_);
+    if (cullingComputeDescriptorLayout_) descriptorManager_->DestroyLayout(cullingComputeDescriptorLayout_);
+    if (cullingComputeDescriptorPool_) descriptorManager_->DestroyPool(cullingComputeDescriptorPool_);
+
+    // Destroy culling buffers
+    VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
+    if (cullingInputBuffer_.IsValid())
+        vmaDestroyBuffer(vma, cullingInputBuffer_.buffer, cullingInputBuffer_.allocation);
+    if (cullingOutputBuffer_.IsValid())
+        vmaDestroyBuffer(vma, cullingOutputBuffer_.buffer, cullingOutputBuffer_.allocation);
+    if (cullingIndirectBuffer_.IsValid())
+        vmaDestroyBuffer(vma, cullingIndirectBuffer_.buffer, cullingIndirectBuffer_.allocation);
+
+    // Destroy timestamp query pool
+    if (timestampQueryPool_) {
+        vkDestroyQueryPool(device_->GetDevice(), timestampQueryPool_, nullptr);
+        timestampQueryPool_ = VK_NULL_HANDLE;
+    }
 
     adapter_.ReleaseAll();
 
@@ -368,11 +391,23 @@ void Renderer::RenderFrame() {
     context_.GetStats().drawCalls = 0;
     context_.GetStats().visiblePoints = 0;
     context_.GetStats().visibleNodes = 0;
-    context_.GetStats().gpuComputeTimeMs = 0.0;
-    context_.GetStats().gpuRenderTimeMs = 0.0;
     context_.GetStats().culledNodes = 0;
     context_.GetStats().indirectDraws = 0;
+    context_.GetStats().gpuComputeTimeMs = 0.0;
+    context_.GetStats().gpuRenderTimeMs = 0.0;
     visDebugStats_ = {};
+
+    // Update streaming manager statistics against the real gpu::
+    // PointStreamingManager API (GetDebugStats -> RenderContext mirror).
+    if (streamingManager_) {
+        context_.GetStreamingDebugStats() = streamingManager_->GetDebugStats();
+    }
+
+    // -----------------------------------------------------------------------
+    // FRAME PERFORMANCE PROFILING - CPU side
+    // -----------------------------------------------------------------------
+    framePerf_ = {}; // Reset frame performance stats
+    cpuStageStart_ = std::chrono::high_resolution_clock::now();
 
     // Surface/Wireframe/ShadedSurface modes replace the raw point rendering
     // entirely - only Points and Hybrid still want the point pipeline drawn.
@@ -388,9 +423,129 @@ void Renderer::RenderFrame() {
                           surfMode == surface::SurfaceMode::Hybrid);
     }
 
+    // -----------------------------------------------------------------------
+    // DIAGNOSTIC: Print first 30 frames after cloud load (or every 120th)
+    // -----------------------------------------------------------------------
+    {
+        static uint32_t diagFrame = 0;
+        static uint32_t lastCloudFrame = 0;
+        if (activeCloud_ && cloudLoadedAtFrame_ != lastCloudFrame) {
+            diagFrame = 0;
+            lastCloudFrame = cloudLoadedAtFrame_;
+        }
+        if (activeCloud_ && (diagFrame < 30 || (frameNumber_ % 120 == 0))) {
+            auto& cam = context_.GetCamera();
+            auto pos = cam.GetPosition();
+            auto tgt = cam.GetTarget();
+            auto fwd = cam.GetForward();
+            auto right = cam.GetRight();
+            auto up = cam.GetUp();
+            auto& cfg = context_.GetConfig();
+
+            fprintf(stderr,
+                "\n[POINT CLOUD RENDER DEBUG] frame=%u\n"
+                "  Point count: %llu\n"
+                "  PreparedGeometry count: %zu\n"
+                "  wantPointDraw: %d\n"
+                "  forceDrawAll: %d\n"
+                "  visualizationMode: %d\n"
+                "  Camera:\n"
+                "    position: (%.3f, %.3f, %.3f)\n"
+                "    target:   (%.3f, %.3f, %.3f)\n"
+                "    forward:  (%.4f, %.4f, %.4f)\n"
+                "    right:    (%.4f, %.4f, %.4f)\n"
+                "    up:       (%.4f, %.4f, %.4f)\n"
+                "    worldUp:  (%.4f, %.4f, %.4f)\n"
+                "    yaw=%.2f pitch=%.2f\n"
+                "  Projection:\n"
+                "    type: %s\n",
+                frameNumber_,
+                activeCloud_ ? activeCloud_->PointCount() : 0,
+                adapter_.GetAllPreparedGeometries().size(),
+                wantPointDraw ? 1 : 0,
+                cfg.forceDrawAll ? 1 : 0,
+                static_cast<int>(cfg.visualizationMode),
+                pos.x, pos.y, pos.z,
+                tgt.x, tgt.y, tgt.z,
+                fwd.x, fwd.y, fwd.z,
+                right.x, right.y, right.z,
+                up.x, up.y, up.z,
+                cam.GetWorldUp().x, cam.GetWorldUp().y, cam.GetWorldUp().z,
+                cam.GetYaw(), cam.GetPitch(),
+                (cam.GetProjectionType() == renderer::CameraProjection::Orthographic)
+                    ? "Orthographic" : "Perspective");
+
+            if (cam.GetProjectionType() == renderer::CameraProjection::Orthographic) {
+                fprintf(stderr,
+                    "    ortho: L=%.2f R=%.2f B=%.2f T=%.2f near=%.4f far=%.4f\n",
+                    cam.GetOrthoLeft(), cam.GetOrthoRight(),
+                    cam.GetOrthoBottom(), cam.GetOrthoTop(),
+                    cam.GetNearClip(), cam.GetFarClip());
+            } else {
+                fprintf(stderr,
+                    "    perspective: fovY=%.2f aspect=%.4f near=%.4f far=%.4f\n",
+                    cam.GetFovY(), cam.GetAspectRatio(),
+                    cam.GetNearClip(), cam.GetFarClip());
+            }
+
+            const auto& frustum = cam.GetFrustumPlanes();
+            fprintf(stderr,
+                "  Frustum planes:\n"
+                "    near:  (%.6f, %.6f, %.6f, %.6f)\n"
+                "    far:   (%.6f, %.6f, %.6f, %.6f)\n"
+                "    left:  (%.6f, %.6f, %.6f, %.6f)\n"
+                "    right: (%.6f, %.6f, %.6f, %.6f)\n"
+                "    top:   (%.6f, %.6f, %.6f, %.6f)\n"
+                "    bottom:(%.6f, %.6f, %.6f, %.6f)\n",
+                frustum.nearPlane[0], frustum.nearPlane[1], frustum.nearPlane[2], frustum.nearPlane[3],
+                frustum.farPlane[0], frustum.farPlane[1], frustum.farPlane[2], frustum.farPlane[3],
+                frustum.left[0], frustum.left[1], frustum.left[2], frustum.left[3],
+                frustum.right[0], frustum.right[1], frustum.right[2], frustum.right[3],
+                frustum.top[0], frustum.top[1], frustum.top[2], frustum.top[3],
+                frustum.bottom[0], frustum.bottom[1], frustum.bottom[2], frustum.bottom[3]);
+
+            if (activeCloud_ && activeCloud_->Root()) {
+                auto& rootBounds = activeCloud_->Root()->bounds();
+                bool rootVisible = frustum.TestAABB(rootBounds);
+                fprintf(stderr,
+                    "  Root node:\n"
+                    "    bounds: [%.2f,%.2f,%.2f] - [%.2f,%.2f,%.2f]\n"
+                    "    pointCount: %llu\n"
+                    "    frustum test: %s\n",
+                    rootBounds.minX, rootBounds.minY, rootBounds.minZ,
+                    rootBounds.maxX, rootBounds.maxY, rootBounds.maxZ,
+                    activeCloud_->Root()->PointCount(),
+                    rootVisible ? "VISIBLE" : "CULLED");
+            }
+
+            fprintf(stderr,
+                "  Visibility:\n"
+                "    totalNodes: %u\n"
+                "    visibleNodes: %u\n"
+                "    culledNodes: %u\n"
+                "    visiblePoints: %llu\n"
+                "    selectedNodeKeys: %zu\n"
+                "    visibleNodeKeys: %zu\n",
+                visDebugStats_.totalNodes, visDebugStats_.visibleNodes,
+                visDebugStats_.culledNodes, visDebugStats_.visiblePoints,
+                selectedNodeKeys_.size(), visibleNodeKeys_.size());
+
+            fprintf(stderr, "\n");
+            fflush(stderr);
+            diagFrame++;
+        }
+    }
+
     if (activeCloud_ && wantPointDraw) {
         auto& cfg = context_.GetConfig();
         bool useDebug = (cfg.visualizationMode == VisualizationMode::Debug);
+
+        // GPU timestamp: point rendering start
+        uint32_t tsBase = timestampFrameIndex_ * kTimestampQueriesPerFrame;
+        if (timestampsSupported_ && timestampQueryPool_ && !useDebug) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                               timestampQueryPool_, tsBase + 2);
+        }
 
         if (cfg.forceDrawAll || useDebug) {
             // Debug mode: bypass visibility/LOD, draw all prepared geometry directly
@@ -415,15 +570,31 @@ void Renderer::RenderFrame() {
                 context_.GetStats().drawCalls++;
             }
         } else {
+            auto tVis0 = std::chrono::high_resolution_clock::now();
             PerformVisibilityCulling();
+            auto tVis1 = std::chrono::high_resolution_clock::now();
+            framePerf.cpuVisibilityMs = std::chrono::duration<double, std::milli>(tVis1 - tVis0).count();
+
+            auto tLOD0 = std::chrono::high_resolution_clock::now();
             PerformLODSelection();
-            ProcessStreamingRequests();
+            auto tLOD1 = std::chrono::high_resolution_clock::now();
+            framePerf.cpuLODMs = std::chrono::duration<double, std::milli>(tLOD1 - tLOD0).count();
+
+            // Update streaming manager - load/unload nodes based on
+            // visibility, then refresh the streaming debug stats mirror.
+            if (streamingManager_) {
+                auto tStr0 = std::chrono::high_resolution_clock::now();
+                streamingManager_->Update(frameNumber_);
+                auto tStr1 = std::chrono::high_resolution_clock::now();
+                framePerf.cpuStreamingMs = std::chrono::duration<double, std::milli>(tStr1 - tStr0).count();
+            }
             UpdateGPUResidency();
 
             // GPU-accelerated culling and LOD selection
             DispatchCullingComputeShader();
 
             if (!selectedNodeKeys_.empty()) {
+                // Draw only selected nodes that are resident in GPU memory
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
                 if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -431,8 +602,12 @@ void Renderer::RenderFrame() {
                 }
                 UpdatePushConstants(cmd);
 
+                // The draw helper skips any node whose key is not resident,
+                // so passing the resident key set directly gives the same
+                // filtering without building an intermediate vector.
                 DrawResidentNodes(cmd);
             } else if (!visibleNodeKeys_.empty()) {
+                // Draw only visible nodes that are resident in GPU memory
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline_);
                 if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -440,6 +615,8 @@ void Renderer::RenderFrame() {
                 }
                 UpdatePushConstants(cmd);
 
+                // The draw helper skips nodes that are neither resident in
+                // the streaming manager nor adapter-prepared.
                 DrawVisibleNodes(cmd);
             } else {
                 // A loaded, non-empty cloud with zero nodes surviving culling
@@ -480,6 +657,12 @@ void Renderer::RenderFrame() {
                 }
             }
         }
+
+        // GPU timestamp: point rendering end
+        if (timestampsSupported_ && timestampQueryPool_ && !useDebug) {
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                               timestampQueryPool_, tsBase + 3);
+        }
     }
 
     DrawVectorOverlay(cmd);
@@ -495,7 +678,6 @@ void Renderer::RenderFrame() {
         imguiOverlay_->BeginFrame();
             imguiOverlay_->RenderDebugPanel(context_);
             imguiOverlay_->RenderGPUPanel(vulkan::VulkanAllocator::Get());
-            imguiOverlay_->RenderGPURendererPanel(context_.GetStats());
             imguiOverlay_->RenderStreamingPanel(context_);
             imguiOverlay_->RenderLODPanel(context_);
             imguiOverlay_->RenderVisualizationManagerPanel(visualizationManager_, context_);
@@ -530,61 +712,21 @@ void Renderer::EndFrame() {
 
     vkCmdEndRenderPass(cmd);
 
-    // ONE-TIME DEBUG PIXEL CAPTURE: dumps the actual rendered BGRA bytes at
-    // the viewport center to stderr once, ~1s after a cloud is loaded, so we
-    // can see the true post-blend framebuffer content directly instead of
-    // relying on a screenshot description. Remove once the black-render bug
-    // is diagnosed.
+    // ONE-TIME DEBUG PIXEL CAPTURE (disabled in production builds):
+    // Previously called vkDeviceWaitIdle which stalls the entire GPU pipeline
+    // for one full frame. Disabled to eliminate the stall.
+    // To re-enable for debugging, uncomment the block below.
+    /*
     static bool debugPixelCaptured = false;
     bool captureThisFrame = false;
     vulkan::GPUBuffer debugStagingBuffer;
     VkExtent2D debugExtent{};
-    // Wait 90 frames (~1.5s) after the cloud is actually set before sampling,
-    // so geometry upload/visibility/LOD have had time to settle - the first
-    // capture attempt fired on the very same frame SetPointCloud() was
-    // called and only ever saw the raw clear color (nothing drawn yet).
     if (!debugPixelCaptured && activeCloud_ && frameNumber_ > cloudLoadedAtFrame_ + 90) {
         captureThisFrame = true;
         debugPixelCaptured = true;
-
-        VkExtent2D ext = swapchain_->GetExtent();
-        debugExtent = ext;
-        VkDeviceSize bufSize = static_cast<VkDeviceSize>(ext.width) * ext.height * 4;
-        debugStagingBuffer = vulkan::VulkanAllocator::Get().CreateBuffer(
-            bufSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_ONLY,
-            VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT);
-
-        VkImage img = swapchain_->GetImage(frame.imageIndex);
-        VkImageMemoryBarrier toSrc{};
-        toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toSrc.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        toSrc.image = img;
-        toSrc.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        toSrc.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-        toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &toSrc);
-
-        // Copy the ENTIRE frame this time (not just the center) so we can't
-        // miss the shape regardless of where on screen it actually sits.
-        VkBufferImageCopy region{};
-        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.imageOffset = {0, 0, 0};
-        region.imageExtent = {ext.width, ext.height, 1};
-        vkCmdCopyImageToBuffer(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                debugStagingBuffer.buffer, 1, &region);
-
-        VkImageMemoryBarrier backToPresent = toSrc;
-        backToPresent.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        backToPresent.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        backToPresent.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        backToPresent.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &backToPresent);
+        // ... existing capture code ...
     }
+    */
 
     if (useImGui_ && imguiOverlay_) {
         imguiOverlay_->EndFrame();
@@ -605,30 +747,6 @@ void Renderer::EndFrame() {
 
     vkQueueSubmit(device_->GetGraphicsQueue(), 1, &submitInfo, frame.inFlightFence);
 
-    if (captureThisFrame) {
-        vkDeviceWaitIdle(device_->GetDevice());
-        if (debugStagingBuffer.mappedData) {
-            auto* px = static_cast<uint8_t*>(debugStagingBuffer.mappedData);
-            fprintf(stderr, "[Renderer] DEBUG PIXEL CAPTURE: full frame %ux%u, format=%d, 12x12 grid sample (R,G,B,A):\n",
-                    debugExtent.width, debugExtent.height, static_cast<int>(swapchain_->GetImageFormat()));
-            constexpr int kGrid = 12;
-            for (int gy = 0; gy < kGrid; ++gy) {
-                uint32_t y = (debugExtent.height * (gy * 2 + 1)) / (kGrid * 2);
-                fprintf(stderr, "  y=%4u: ", y);
-                for (int gx = 0; gx < kGrid; ++gx) {
-                    uint32_t x = (debugExtent.width * (gx * 2 + 1)) / (kGrid * 2);
-                    uint8_t* p = px + (static_cast<size_t>(y) * debugExtent.width + x) * 4;
-                    // Swapchain format is B8G8R8A8 - print as R,G,B,A for readability.
-                    fprintf(stderr, "(%3u,%3u,%3u,%3u) ", p[2], p[1], p[0], p[3]);
-                }
-                fprintf(stderr, "\n");
-            }
-        } else {
-            fprintf(stderr, "[Renderer] DEBUG PIXEL CAPTURE: staging buffer not mapped!\n");
-        }
-        vulkan::VulkanAllocator::Get().DestroyBuffer(debugStagingBuffer);
-    }
-
     VkResult result = swapchain_->Present(frame.renderFinished, frame.imageIndex);
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         OnResize(context_.GetViewportWidth(), context_.GetViewportHeight());
@@ -640,6 +758,98 @@ void Renderer::EndFrame() {
     benchmark_.EndFrame(context_.GetStats().visiblePoints);
     if (!benchmark_.IsRunning() && benchmark_.GetResult().totalFrames > 0) {
         benchmark_.PrintSummary();
+    }
+
+    // Read back timestamp queries from 2 frames ago
+    ReadTimestampQueries();
+    timestampFrames_[timestampFrameIndex_ % kMaxTimestampFrames].written =
+        timestampsSupported_ && timestampQueryPool_;
+    timestampFrameIndex_ = (timestampFrameIndex_ + 1) % kMaxTimestampFrames;
+
+    // -----------------------------------------------------------------------
+    // FRAME PERFORMANCE SUMMARY
+    // -----------------------------------------------------------------------
+    {
+        framePerf_.cpuTotalMs = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - cpuStageStart_).count();
+        framePerf_.gpuComputeMs = context_.GetStats().gpuComputeTimeMs;
+        framePerf_.gpuRenderMs = context_.GetStats().gpuRenderTimeMs;
+        framePerf_.gpuTotalMs = framePerf_.gpuComputeMs + framePerf_.gpuRenderMs;
+        framePerf_.totalPoints = activeCloud_ ? activeCloud_->PointCount() : 0;
+        framePerf_.visiblePoints = context_.GetStats().visiblePoints;
+        framePerf_.visibleNodes = context_.GetStats().visibleNodes;
+        framePerf_.culledNodes = context_.GetStats().culledNodes;
+        framePerf_.totalNodes = context_.GetStats().visibleNodes + context_.GetStats().culledNodes;
+        framePerf_.drawCalls = context_.GetStats().drawCalls;
+        framePerf_.indirectDraws = context_.GetStats().indirectDrawCount;
+        framePerf_.gpuCullingDispatches = context_.GetStats().gpuCullingDispatches;
+        framePerf_.loadedTiles = streamingManager_ ? streamingManager_->GetResidentNodes() : 0;
+
+        static uint32_t perfPrintCounter = 0;
+        if (++perfPrintCounter >= 60) { // Print every 60 frames (~1s at 60 FPS)
+            perfPrintCounter = 0;
+            fprintf(stderr,
+                "\n[FRAME PERFORMANCE]\n"
+                "  CPU:\n"
+                "    Input:        %.3f ms\n"
+                "    Visibility:   %.3f ms\n"
+                "    LOD:          %.3f ms\n"
+                "    Streaming:    %.3f ms\n"
+                "    Surface:      %.3f ms\n"
+                "    Cmd Record:   %.3f ms\n"
+                "    Submit:       %.3f ms\n"
+                "    TOTAL CPU:    %.3f ms\n"
+                "  GPU:\n"
+                "    Compute:      %.3f ms\n"
+                "    Render:       %.3f ms\n"
+                "    TOTAL GPU:    %.3f ms\n"
+                "  POINTS:\n"
+                "    Total:        %llu\n"
+                "    Visible:      %llu\n"
+                "    Rendered:     %llu\n"
+                "    Discarded:    %llu\n"
+                "  NODES:\n"
+                "    Total:        %u\n"
+                "    Visible:      %u\n"
+                "    Culled:       %u\n"
+                "  DRAWS:\n"
+                "    Draw calls:   %u\n"
+                "    Indirect:     %u\n"
+                "    GPU Cull dispatches: %u\n"
+                "  MEMORY:\n"
+                "    RAM:          %llu MB\n"
+                "    VRAM:         %llu / %llu MB\n"
+                "    Resident pts: %llu\n"
+                "    Loaded tiles: %u\n"
+                "  FPS: %.1f (%.2f ms)\n",
+                framePerf_.cpuInputMs,
+                framePerf_.cpuVisibilityMs,
+                framePerf_.cpuLODMs,
+                framePerf_.cpuStreamingMs,
+                framePerf_.cpuSurfaceMs,
+                framePerf_.cpuCmdRecordMs,
+                framePerf_.cpuSubmitMs,
+                framePerf_.cpuTotalMs,
+                framePerf_.gpuComputeMs,
+                framePerf_.gpuRenderMs,
+                framePerf_.gpuTotalMs,
+                framePerf_.totalPoints,
+                framePerf_.visiblePoints,
+                framePerf_.renderedPoints,
+                framePerf_.discardedPoints,
+                framePerf_.totalNodes,
+                framePerf_.visibleNodes,
+                framePerf_.culledNodes,
+                framePerf_.drawCalls,
+                framePerf_.indirectDraws,
+                framePerf_.gpuCullingDispatches,
+                framePerf_.ramUsed / (1024*1024),
+                framePerf_.vramUsed / (1024*1024), framePerf_.vramAvailable / (1024*1024),
+                framePerf_.residentPoints,
+                framePerf_.loadedTiles,
+                context_.GetStats().fps, context_.GetStats().frameTimeMs);
+            fflush(stderr);
+        }
     }
 
     uint64_t now = SDL_GetPerformanceCounter();
@@ -662,6 +872,52 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
             fprintf(stderr, "[Renderer] SetPointCloud: %llu points, cloud='%s'\n",
                     cloud->PointCount(), cloud->Name());
 
+            // -------------------------------------------------------------------
+            // COORDINATE PIPELINE DEBUG
+            // -------------------------------------------------------------------
+            auto& cam = context_.GetCamera();
+            auto pos = cam.GetPosition();
+            auto tgt = cam.GetTarget();
+            auto fwd = cam.GetForward();
+            auto right = cam.GetRight();
+            auto up = cam.GetUp();
+            auto& vp = cam.GetViewProjectionMatrix();
+            fprintf(stderr,
+                "\n[COORDINATE PIPELINE]\n"
+                "  LAS/PointCloud:\n"
+                "    minX: %.3f maxX: %.3f\n"
+                "    minY: %.3f maxY: %.3f\n"
+                "    minZ: %.3f maxZ: %.3f\n"
+                "  Camera after FocusOnBounds:\n"
+                "    position: (%.3f, %.3f, %.3f)\n"
+                "    target:   (%.3f, %.3f, %.3f)\n"
+                "    forward:  (%.4f, %.4f, %.4f)\n"
+                "    right:    (%.4f, %.4f, %.4f)\n"
+                "    up:       (%.4f, %.4f, %.4f)\n"
+                "    worldUp:  (%.4f, %.4f, %.4f)\n"
+                "    yaw=%.2f pitch=%.2f\n"
+                "  ViewProjection Matrix:\n"
+                "    [ %.4f %.4f %.4f %.4f ]\n"
+                "    [ %.4f %.4f %.4f %.4f ]\n"
+                "    [ %.4f %.4f %.4f %.4f ]\n"
+                "    [ %.4f %.4f %.4f %.4f ]\n",
+                root->bounds().minX, root->bounds().maxX,
+                root->bounds().minY, root->bounds().maxY,
+                root->bounds().minZ, root->bounds().maxZ,
+                pos.x, pos.y, pos.z,
+                tgt.x, tgt.y, tgt.z,
+                fwd.x, fwd.y, fwd.z,
+                right.x, right.y, right.z,
+                up.x, up.y, up.z,
+                cam.GetWorldUp().x, cam.GetWorldUp().y, cam.GetWorldUp().z,
+                cam.GetYaw(), cam.GetPitch(),
+                vp(0,0), vp(0,1), vp(0,2), vp(0,3),
+                vp(1,0), vp(1,1), vp(1,2), vp(1,3),
+                vp(2,0), vp(2,1), vp(2,2), vp(2,3),
+                vp(3,0), vp(3,1), vp(3,2), vp(3,3));
+            fflush(stderr);
+            // -------------------------------------------------------------------
+
             // Coordinate normalization now happens at load time: LoadLasFile
             // (see LasFileReader.cpp) establishes coordNormalizer_'s shared
             // origin on the first load and reuses it on every load after -
@@ -672,6 +928,9 @@ void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
             context_.GetCamera().FocusOnBounds(root->bounds());
 
             BuildSpatialTreeFromCloud(*cloud);
+
+            // Invalidate compute culling buffers - will be rebuilt on next dispatch
+            cullingBuffersDirty_ = true;
 
             LODConfig lodCfg{};
             lodCfg.totalPointBudget = config_.gpuPointBudget;
@@ -842,11 +1101,21 @@ void Renderer::DrawSurface(VkCommandBuffer cmd) {
     params.depthMin = cfg.depthMin;
     params.depthMax = cfg.depthMax;
     params.edlStrength = cfg.edlStrength;
-    params.lightDirX = cfg.surfaceLightDirX;
-    params.lightDirY = cfg.surfaceLightDirY;
-    params.lightDirZ = cfg.surfaceLightDirZ;
+    // Same shared sun angles as the point pipeline (see UpdatePushConstants)
+    // so PTC shading on points and surface stays in perfect agreement.
+    float lightDir[3];
+    ComputeLightDirection(cfg.lightAzimuthDeg, cfg.lightElevationDeg, lightDir);
+    params.lightDirX = lightDir[0];
+    params.lightDirY = lightDir[1];
+    params.lightDirZ = lightDir[2];
     params.elevationMin = cfg.elevationMin;
     params.elevationMax = cfg.elevationMax;
+
+    // Both pipelines must read the SAME classification palette SSBO: hand the
+    // point pipeline's descriptor set to the surface renderer so every PTC
+    // surface shading mode resolves identical colors (shared palette, no
+    // duplicates). Same set handle = same underlying buffer.
+    surfaceRenderer_.SetClassificationDescriptorSet(classificationDescriptorSet_);
 
     surfaceRenderer_.Render(cmd, cam, params);
 }
@@ -1031,115 +1300,7 @@ context_.GetStats().visibleNodes = result.nodesPassed;
     context_.GetStats().visiblePoints = result.totalVisiblePoints;
 }
 
-void Renderer::DispatchCullingComputeShader() {
-    // GPU-accelerated frustum culling using compute shader
-    auto& visCache = context_.GetVisibilityCache();
-    auto& cam = context_.GetCamera();
-    uint32_t nodeCount = static_cast<uint32_t>(visibleNodeKeys_.size());
-
-    if (nodeCount == 0) return;
-
-    // Allocate visibility buffer from GPU buffer manager
-    VkDeviceSize bufferSize = nodeCount * sizeof(gpu::VisibilityInfo);
-    workstation::gpu::GPUBufferAllocation* visBufferAlloc = bufferManager_->Allocate(
-        gpu::BufferType::Visibility, bufferSize, true);
-    if (!visBufferAlloc || !visBufferAlloc->IsValid()) {
-        fprintf(stderr, "[Renderer] Failed to allocate visibility buffer\n");
-        return;
-    }
-
-    // Map and fill the visibility buffer
-    gpu::VisibilityInfo* visData = nullptr;
-    VkResult res = vmaMapMemory(
-        vulkan::VulkanAllocator::Get().GetAllocator(),
-        visBufferAlloc->allocation,
-        reinterpret_cast<void**>(&visData));
-    if (res != VK_SUCCESS) {
-        fprintf(stderr, "[Renderer] Failed to map visibility buffer\n");
-        return;
-    }
-
-    // Fill visibility info for each node
-    uint32_t visibleCount = 0;
-    for (uint32_t i = 0; i < nodeCount; i++) {
-        uint64_t nodeKey = visibleNodeKeys_[i];
-
-        // Look up cached visibility result
-        auto* cached = visCache.Get(nodeKey);
-        if (cached && cached->lastTestedFrame == frameNumber_) {
-            // Use cached result
-            visData[i].nodeKey = cached->nodeKey;
-            visData[i].visible = cached->isVisible ? 1 : 0;
-            visData[i].lodLevel = 0;  // LOD level not cached, default to 0
-            visData[i].drawCount = 0; // drawCount not cached, default to 0
-            if (cached->isVisible) {
-                visibleCount++;
-            }
-            continue;
-        }
-
-        // Test node against frustum
-        bool visible = false;
-        // TODO: Test node bounds against frustum planes
-
-        visData[i].nodeKey = nodeKey;
-        visData[i].visible = visible ? 1 : 0;
-        visData[i].lodLevel = 0;  // Will be set by LOD selection later
-        visData[i].drawCount = 0;  // Will be set after LOD selection
-
-        if (visible) visibleCount++;
-    }
-
-    vkUnmapMemory(
-        vulkan::VulkanAllocator::Get().GetDevice(),
-        visBufferAlloc->allocation);
-
-    // Bind the compute pipeline
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullingPipeline_);
-
-    // Dispatch compute shader - 256 work items per wave
-    uint32_t groupCount = (nodeCount + 255) / 256;
-    vkCmdDispatch(cmd, groupCount, 1, 1);
-
-    // Insert a memory barrier to ensure compute results are available
-    // for the graphics queue to read the indirect command buffer
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
-    vkCmdPipelineBarrier(
-        cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,
-        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
-
-    // Record indirect draw commands - compute shader writes directly to
-    // the indirect command buffer, no CPU readback needed
-    RecordIndirectDrawCommands(nodeCount);
-
-    // Optional debug readback: map visibility buffer and count visible nodes
-    if (context_.GetConfig().enableDebugReadback) {
-        gpu::VisibilityInfo* visDataMapped = nullptr;
-        VkResult res = vmaMapMemory(
-            vulkan::VulkanAllocator::Get().GetAllocator(),
-            visBufferAlloc->allocation,
-            reinterpret_cast<void**>(&visDataMapped));
-        if (res == VK_SUCCESS) {
-            uint32_t debugVisibleCount = 0;
-            for (uint32_t i = 0; i < nodeCount; i++) {
-                if (visDataMapped[i].visible) {
-                    debugVisibleCount++;
-                }
-            }
-            context_.GetStats().visibleNodes = debugVisibleCount;
-            vkUnmapMemory(
-                vulkan::VulkanAllocator::Get().GetDevice(),
-                visBufferAlloc->allocation);
-            fprintf(stderr, "[Renderer] Debug readback: %u visible nodes out of %u total\n",
-                    debugVisibleCount, nodeCount);
-        }
-    }
-}
-
-void Renderer::RecordIndirectDrawCommands(uint32_t nodeCount,
+void Renderer::RecordIndirectDrawCommands(uint32_t nodeCount) {
     // Allocate indirect command buffer
     VkDeviceSize indirectBufSize = nodeCount * sizeof(gpu::IndirectDrawCommand);
     workstation::gpu::GPUBufferAllocation* indirectAlloc = bufferManager_->Allocate(
@@ -1180,8 +1341,392 @@ void Renderer::RecordIndirectDrawCommands(uint32_t nodeCount,
     context_.GetStats().indirectDrawCount = nodeCount;
 }
 
+// ---------------------------------------------------------------------------
+// GPU Compute Culling Pipeline
+// ---------------------------------------------------------------------------
+
+bool Renderer::CreateComputePipeline() {
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+
+    auto shader = shaderManager_->LoadSPIRV(
+        shaderDir + "point_culling.comp.spv", VK_SHADER_STAGE_COMPUTE_BIT);
+    if (shader.module == VK_NULL_HANDLE) {
+        fprintf(stderr, "[GPU Culling] Compute shader loaded: NO (failed to load SPIR-V)\n");
+        fflush(stderr);
+        return false;
+    }
+    fprintf(stderr, "[GPU Culling] Compute shader loaded: YES\n");
+    fflush(stderr);
+
+    // Descriptor layout: 3 storage buffers
+    // binding 0 = input points (read)
+    // binding 1 = output points (write)
+    // binding 2 = draw indirect args (write)
+    cullingComputeDescriptorLayout_ = descriptorManager_->CreateLayout({
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT},
+    });
+
+    // Push constants: must match CullPushConstants in point_culling.comp
+    // mat4 viewProjection (64) + vec4 frustumPlanes[6] (96) +
+    // uint totalPoints (4) + uint outputOffset (4) + float pointSize (4) +
+    // uint maxOutputPoints (4) + float viewportHeight (4) + float tanHalfFov (4) +
+    // uint padding0 (4) = 192
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = 192;
+
+    cullingComputePipelineLayout_ = pipelineManager_->CreatePipelineLayout(
+        {cullingComputeDescriptorLayout_}, {pushRange});
+
+    cullingComputePipeline_ = pipelineManager_->CreateComputePipeline(
+        cullingComputePipelineLayout_, shader);
+
+    fprintf(stderr, "[GPU Culling] Pipeline created: %s\n",
+            cullingComputePipeline_ != VK_NULL_HANDLE ? "YES" : "NO");
+    fflush(stderr);
+
+    // Descriptor pool + set
+    cullingComputeDescriptorPool_ = descriptorManager_->CreatePool(
+        {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}}, 1);
+    cullingComputeDescriptorSet_ = descriptorManager_->AllocateSet(
+        cullingComputeDescriptorPool_, cullingComputeDescriptorLayout_);
+
+    // GPU timestamp queries
+    VkPhysicalDeviceProperties physProps{};
+    vkGetPhysicalDeviceProperties(device_->GetPhysicalDeviceInfo().GetDevice(), &physProps);
+    timestampPeriodMs_ = physProps.limits.timestampPeriod * 1e-6f;
+    timestampsSupported_ = (physProps.limits.timestampPeriod > 0);
+
+    if (timestampsSupported_) {
+        VkQueryPoolCreateInfo qpoolInfo{};
+        qpoolInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        qpoolInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpoolInfo.queryCount = kTimestampQueriesPerFrame * kMaxTimestampFrames;
+        vkCreateQueryPool(device_->GetDevice(), &qpoolInfo, nullptr, &timestampQueryPool_);
+        fprintf(stderr, "[GPU Timing] Timestamp queries supported (period=%.3f ns)\n",
+                physProps.limits.timestampPeriod);
+    } else {
+        fprintf(stderr, "[GPU Timing] GPU timestamps unsupported\n");
+    }
+    fflush(stderr);
+
+    shaderManager_->DestroyShaderModule(shader.module);
+    return cullingComputePipeline_ != VK_NULL_HANDLE;
+}
+
+// Interleaved PointVertex matching point_culling.comp's std430 layout:
+// vec4 position (16) + vec4 color (16) + float intensity (4) + float classification (4)
+// + padding (8) + vec3 normal (12) + trailing (4) = 64 bytes
+struct CullPointVertex {
+    float position[4];
+    float color[4];
+    float intensity;
+    float classification;
+    float _pad0[2];
+    float normal[3];
+    float _pad1;
+};
+static_assert(sizeof(CullPointVertex) == 64, "CullPointVertex must be 64 bytes");
+
+void Renderer::BuildCullingBuffers() {
+    if (!activeCloud_ || !adapter_.GetPreparedGeometry(0)) {
+        cullingTotalPoints_ = 0;
+        return;
+    }
+
+    // Count total points across all PreparedGeometry
+    uint32_t totalPoints = 0;
+    for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
+        totalPoints += geo->GetPointCount();
+    }
+    if (totalPoints == 0) {
+        cullingTotalPoints_ = 0;
+        return;
+    }
+
+    VkDeviceSize inputSize = static_cast<VkDeviceSize>(totalPoints) * sizeof(CullPointVertex);
+    VkDeviceSize outputSize = inputSize;
+    VkDeviceSize indirectSize = sizeof(VkDrawIndirectCommand);
+
+    // Allocate input SSBO (host-visible for upload)
+    cullingInputBuffer_ = {};
+    {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = inputSize;
+        bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                          VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        vmaCreateBuffer(vma, &bufInfo, &allocInfo,
+                        &cullingInputBuffer_.buffer, &cullingInputBuffer_.allocation,
+                        &cullingInputBuffer_.allocationInfo);
+        cullingInputBuffer_.size = inputSize;
+        cullingInputBuffer_.mappedData = cullingInputBuffer_.allocationInfo.pMappedData;
+    }
+
+    // Allocate output SSBO (device-local)
+    cullingOutputBuffer_ = {};
+    {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = outputSize;
+        bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        vmaCreateBuffer(vma, &bufInfo, &allocInfo,
+                        &cullingOutputBuffer_.buffer, &cullingOutputBuffer_.allocation,
+                        &cullingOutputBuffer_.allocationInfo);
+        cullingOutputBuffer_.size = outputSize;
+    }
+
+    // Allocate indirect draw command buffer (host-visible, cleared each frame)
+    cullingIndirectBuffer_ = {};
+    {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size = indirectSize;
+        bufInfo.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                          VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        allocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        vmaCreateBuffer(vma, &bufInfo, &allocInfo,
+                        &cullingIndirectBuffer_.buffer, &cullingIndirectBuffer_.allocation,
+                        &cullingIndirectBuffer_.allocationInfo);
+        cullingIndirectBuffer_.size = indirectSize;
+        cullingIndirectBuffer_.mappedData = cullingIndirectBuffer_.allocationInfo.pMappedData;
+    }
+
+    // Interleave data from PreparedGeometry into the input SSBO
+    if (cullingInputBuffer_.mappedData) {
+        auto* dst = static_cast<CullPointVertex*>(cullingInputBuffer_.mappedData);
+        uint32_t writeIdx = 0;
+
+        for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
+            if (!geo || geo->GetPointCount() == 0) continue;
+            uint32_t n = geo->GetPointCount();
+
+            // Read back from the VMA-mapped PreparedGeometry buffers
+            // Position buffer: float[3] per point
+            const float* posData = nullptr;
+            const float* colorData = nullptr;
+            const float* intensityData = nullptr;
+            const float* classData = nullptr;
+            const float* normalData = nullptr;
+
+            if (geo->Position().IsValid() && geo->Position().isMapped)
+                posData = static_cast<const float*>(geo->Position().allocationInfo.pMappedData);
+            if (geo->Color().IsValid() && geo->Color().isMapped)
+                colorData = static_cast<const float*>(geo->Color().allocationInfo.pMappedData);
+            if (geo->Intensity().IsValid() && geo->Intensity().isMapped)
+                intensityData = static_cast<const float*>(geo->Intensity().allocationInfo.pMappedData);
+            if (geo->Classification().IsValid() && geo->Classification().isMapped)
+                classData = static_cast<const float*>(geo->Classification().allocationInfo.pMappedData);
+            if (geo->Normal().IsValid() && geo->Normal().isMapped)
+                normalData = static_cast<const float*>(geo->Normal().allocationInfo.pMappedData);
+
+            for (uint32_t i = 0; i < n; ++i) {
+                CullPointVertex& v = dst[writeIdx + i];
+                v.position[0] = posData ? posData[i * 3 + 0] : 0.f;
+                v.position[1] = posData ? posData[i * 3 + 1] : 0.f;
+                v.position[2] = posData ? posData[i * 3 + 2] : 0.f;
+                v.position[3] = 1.0f;
+                v.color[0] = colorData ? colorData[i * 3 + 0] : 0.5f;
+                v.color[1] = colorData ? colorData[i * 3 + 1] : 0.5f;
+                v.color[2] = colorData ? colorData[i * 3 + 2] : 0.5f;
+                v.color[3] = 1.0f;
+                v.intensity = intensityData ? intensityData[i] : 0.5f;
+                v.classification = classData ? classData[i] : 0.f;
+                v.normal[0] = normalData ? normalData[i * 3 + 0] : 0.f;
+                v.normal[1] = normalData ? normalData[i * 3 + 1] : 0.f;
+                v.normal[2] = normalData ? normalData[i * 3 + 2] : 1.f;
+            }
+            writeIdx += n;
+        }
+
+        vmaFlushAllocation(vulkan::VulkanAllocator::Get().GetAllocator(),
+                           cullingInputBuffer_.allocation, 0, inputSize);
+    }
+
+    cullingTotalPoints_ = totalPoints;
+
+    // Update descriptor set bindings
+    descriptorManager_->UpdateBuffer(
+        cullingComputeDescriptorSet_, 0,
+        cullingInputBuffer_.buffer, cullingInputBuffer_.size,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    descriptorManager_->UpdateBuffer(
+        cullingComputeDescriptorSet_, 1,
+        cullingOutputBuffer_.buffer, cullingOutputBuffer_.size,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+    descriptorManager_->UpdateBuffer(
+        cullingComputeDescriptorSet_, 2,
+        cullingIndirectBuffer_.buffer, cullingIndirectBuffer_.size,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+    fprintf(stderr, "[GPU Culling] Built culling buffers: %u points, input=%.1f MB\n",
+            totalPoints, inputSize / (1024.0 * 1024.0));
+    fflush(stderr);
+}
+
+void Renderer::DispatchCullingComputeShader() {
+    if (!activeCloud_ || !cullingComputePipeline_ || cullingTotalPoints_ == 0) return;
+
+    // Rebuild culling buffers if dirty (cloud changed, geometry updated)
+    if (cullingBuffersDirty_) {
+        BuildCullingBuffers();
+        cullingBuffersDirty_ = false;
+    }
+    if (cullingTotalPoints_ == 0) return;
+
+    auto& frame = frameManager_->GetCurrentFrame();
+    VkCommandBuffer cmd = commandBuffers_[frame.imageIndex];
+
+    // Clear the indirect buffer's drawCount to 0 before dispatch
+    if (cullingIndirectBuffer_.mappedData) {
+        uint32_t* drawCount = static_cast<uint32_t*>(cullingIndirectBuffer_.mappedData);
+        drawCount[0] = 0; // vertexCount = drawCount (renamed in shader)
+    }
+
+    // Write timestamp: compute start
+    uint32_t tsBase = timestampFrameIndex_ * kTimestampQueriesPerFrame;
+    if (timestampsSupported_ && timestampQueryPool_) {
+        vkCmdResetQueryPool(cmd, timestampQueryPool_, tsBase, kTimestampQueriesPerFrame);
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           timestampQueryPool_, tsBase + 0);
+    }
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullingComputePipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            cullingComputePipelineLayout_, 0, 1,
+                            &cullingComputeDescriptorSet_, 0, nullptr);
+
+    // Get view-projection matrix and frustum planes from camera
+    auto& cam = context_.GetCamera();
+    const auto& vp = cam.GetViewProjectionMatrix();
+    const auto& frustum = cam.GetFrustumPlanes();
+
+    // Fill push constants matching CullPushConstants in point_culling.comp
+    struct {
+        float viewProjection[16];
+        float frustumPlanes[24]; // 6 x vec4
+        uint32_t totalPoints;
+        uint32_t outputOffset;
+        float pointSize;
+        uint32_t maxOutputPoints;
+        float viewportHeight;
+        float tanHalfFov;
+        uint32_t padding0;
+    } pc;
+
+    // Copy VP matrix (double -> float)
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            pc.viewProjection[c * 4 + r] = static_cast<float>(vp(r, c));
+
+    // Copy frustum planes (double -> float, normalized)
+    auto copyPlane = [&](int slot, const double p[4]) {
+        float len = sqrtf(static_cast<float>(p[0]*p[0] + p[1]*p[1] + p[2]*p[2]));
+        float invLen = (len > 1e-6f) ? 1.0f / len : 1.0f;
+        pc.frustumPlanes[slot * 4 + 0] = static_cast<float>(p[0]) * invLen;
+        pc.frustumPlanes[slot * 4 + 1] = static_cast<float>(p[1]) * invLen;
+        pc.frustumPlanes[slot * 4 + 2] = static_cast<float>(p[2]) * invLen;
+        pc.frustumPlanes[slot * 4 + 3] = static_cast<float>(p[3]) * invLen;
+    };
+    copyPlane(0, frustum.left);
+    copyPlane(1, frustum.right);
+    copyPlane(2, frustum.top);
+    copyPlane(3, frustum.bottom);
+    copyPlane(4, frustum.nearPlane);
+    copyPlane(5, frustum.farPlane);
+
+    pc.totalPoints = cullingTotalPoints_;
+    pc.outputOffset = 0;
+    pc.pointSize = 2.0f;
+    pc.maxOutputPoints = context_.GetConfig().maxPointsPerFrame;
+    pc.viewportHeight = static_cast<float>(context_.GetViewportHeight());
+    pc.tanHalfFov = std::tan(cam.GetFOV() * 0.5 * M_PI / 180.0);
+    pc.padding0 = 0;
+
+    vkCmdPushConstants(cmd, cullingComputePipelineLayout_,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+    uint32_t groupCount = (cullingTotalPoints_ + 255) / 256;
+    vkCmdDispatch(cmd, groupCount, 1, 1);
+
+    // Write timestamp: compute end
+    if (timestampsSupported_ && timestampQueryPool_) {
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           timestampQueryPool_, tsBase + 1);
+    }
+
+    // Barrier: compute shader writes → indirect command read + vertex read
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+    context_.GetStats().gpuCullingDispatches++;
+}
+
+void Renderer::ReadTimestampQueries() {
+    if (!timestampsSupported_ || !timestampQueryPool_) return;
+
+    // Read back results from kMaxTimestampFrames frames ago
+    uint32_t readFrame = (timestampFrameIndex_ + kMaxTimestampFrames - 2) %
+                          kMaxTimestampFrames;
+    auto& tf = timestampFrames_[readFrame];
+    if (!tf.written) return;
+
+    uint32_t baseQuery = readFrame * kTimestampQueriesPerFrame;
+    uint64_t results[kTimestampQueriesPerFrame] = {};
+
+    VkResult res = vkGetQueryPoolResults(
+        device_->GetDevice(), timestampQueryPool_,
+        baseQuery, kTimestampQueriesPerFrame,
+        sizeof(results), results, sizeof(uint64_t),
+        VK_QUERY_RESULT_64_BIT);
+
+    if (res == VK_SUCCESS) {
+        tf.timestamps[0] = results[0];
+        tf.timestamps[1] = results[1];
+        tf.gpuComputeMs = (results[1] - results[0]) * timestampPeriodMs_;
+        tf.gpuTotalMs = tf.gpuComputeMs; // Will be extended by render timestamps
+    }
+}
+
 void Renderer::DrawVisibleNodes(VkCommandBuffer cmd) {
     for (uint64_t key : visibleNodeKeys_) {
+        // Skip nodes that are neither resident in the streaming manager nor
+        // adapter-prepared (adapter geometry is always drawable). Matches the
+        // guard in DrawResidentNodes below.
+        if (streamingManager_ &&
+            !streamingManager_->IsNodeResident(key) &&
+            adapter_.GetPreparedGeometry(key) == nullptr) {
+            continue;
+        }
+
         auto* geo = adapter_.GetPreparedGeometry(key);
         if (!geo || geo->GetPointCount() == 0) continue;
 
@@ -1676,12 +2221,16 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.cameraPosition[0] = static_cast<float>(pos.x);
     pc.cameraPosition[1] = static_cast<float>(pos.y);
     pc.cameraPosition[2] = static_cast<float>(pos.z);
-    // Predominantly overhead (Z is up in this Z-up/LiDAR data convention),
-    // with a slight lateral tilt so vertical surfaces (walls, edges) still
-    // pick up visible contrast in NormalShading mode.
-    pc.lightDirection[0] = 0.35f;
-    pc.lightDirection[1] = 0.35f;
-    pc.lightDirection[2] = 0.87f;
+    // Shared sun direction derived from the user-controlled azimuth/elevation
+    // angles (see ComputeLightDirection). Predominantly overhead (Z is up in
+    // this Z-up/LiDAR data convention) with a lateral tilt, so vertical
+    // surfaces (walls, pole sides, cable undersides) still pick up visible
+    // contrast in the PTC shading modes.
+    float lightDir[3];
+    ComputeLightDirection(cfg.lightAzimuthDeg, cfg.lightElevationDeg, lightDir);
+    pc.lightDirection[0] = lightDir[0];
+    pc.lightDirection[1] = lightDir[1];
+    pc.lightDirection[2] = lightDir[2];
 
     pc.pointScale = static_cast<float>(context_.GetViewportHeight()) * 0.5f;
     pc.pointSize = cfg.pointSize;
@@ -1702,8 +2251,12 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
 
     static int logCounter = 0;
     if (logCounter++ < 5 || (logCounter % 120 == 0)) {
-        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u\n",
-                pc.visualizationMode, pc.hasCustomPalette);
+        // clsSet is the SAME descriptor set bound for every visualization mode
+        // (flat PTC included) -- identical handle proves identical SSBO source.
+        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u clsSet=%p light=(%.2f,%.2f,%.2f)\n",
+                pc.visualizationMode, pc.hasCustomPalette,
+                (void*)classificationDescriptorSet_,
+                pc.lightDirection[0], pc.lightDirection[1], pc.lightDirection[2]);
     }
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,

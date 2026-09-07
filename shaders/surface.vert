@@ -24,7 +24,7 @@ layout(location = 5) out vec4 fragMaterial;
 layout(location = 6) out float fragDepth;
 layout(location = 7) out vec4 fragShadingParams;
 layout(location = 8) out float fragAlpha;
-layout(location = 9) out uint fragClassificationID;
+layout(location = 9) flat out uint fragClassificationID;
 
 void main() {
     vec4 worldPos = pc.model * vec4(inPosition, 1.0);
@@ -39,4 +39,5 @@ void main() {
     fragDepth = gl_Position.z / gl_Position.w;
     fragShadingParams = pc.shadingParams;
     fragAlpha = pc.lightDir.w;
+    fragClassificationID = classificationID;
 }

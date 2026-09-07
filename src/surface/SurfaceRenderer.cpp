@@ -87,7 +87,15 @@ bool SurfaceRenderer::CreatePipeline() {
         }
     }
 
-    VkDescriptorSetLayout layout = initParams_.descriptorManager->CreateLayout({});
+    // The surface fragment shader reads the shared classification palette
+    // SSBO (set 0, binding 0) for every PTC shading mode. This layout was
+    // previously created EMPTY, so the SSBO was never bound on the surface
+    // pipeline: classificationColors[] read undefined (zero) data and every
+    // PTC surface mode fell back to grey. Declaring the binding here (and
+    // binding Renderer's classificationDescriptorSet_ in Render()) makes the
+    // surface pipeline read the SAME palette buffer as the point pipeline.
+    VkDescriptorSetLayout layout = initParams_.descriptorManager->CreateLayout({
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT}});
 
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -367,6 +375,33 @@ void SurfaceRenderer::UpdatePushConstants(VkCommandBuffer cmd,
 
 void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera,
                                const SurfaceRenderParams& params) {
+    // -----------------------------------------------------------------------
+    // SHADING GEOMETRY DEBUG - print once per session
+    // -----------------------------------------------------------------------
+    static bool diagPrinted = false;
+    if (!diagPrinted && !meshes_.empty()) {
+        uint32_t totalVerts = GetTotalVertexCount();
+        uint32_t totalTris = GetTotalTriangleCount();
+        SLOG_INFO("\n[SHADING GEOMETRY DEBUG]"
+                  "\n  Visualization mode: PTC Shaded"
+                  "\n  Shading mode: %d (%s)"
+                  "\n  Surface mode: %d"
+                  "\n  Rendering object: SurfaceMesh (ElevationGrid/Triangulated)"
+                  "\n  Vertex count: %u"
+                  "\n  Triangle count: %u"
+                  "\n  Normal source: Vertex normal (pre-computed from mesh)"
+                  "\n  Surface GPU buffer: VALID"
+                  "\n  Point GPU buffer: N/A (surface path)",
+                  static_cast<int>(params.shading),
+                  (params.shading == ShadingType::PTCShading) ? "PTCShading" :
+                  (params.shading == ShadingType::PTCEDL) ? "PTCEDL" :
+                  (params.shading == ShadingType::PTCComposite) ? "PTCComposite" :
+                  "Other",
+                  static_cast<int>(params.mode),
+                  totalVerts, totalTris);
+        diagPrinted = true;
+    }
+
     const char* skip = nullptr;
     if (!initialized_)                    skip = "not-initialized";
     else if (!visible_)                   skip = "hidden";
@@ -425,6 +460,22 @@ void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera
     if (activePipeline == VK_NULL_HANDLE) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
+
+    // Bind the shared classification palette SSBO (set 0, binding 0) so all
+    // PTC surface shading modes read the SAME palette as the point pipeline.
+    if (classificationSet_ != VK_NULL_HANDLE) {
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipelineLayout_, 0, 1, &classificationSet_, 0, nullptr);
+        static bool logged = false;
+        if (!logged) {
+            fprintf(stderr, "[SurfaceRenderer] Bound classification SSBO descriptor set=%p "
+                            "(must match the point pipeline's set for shared-palette lookup)\n",
+                    (void*)classificationSet_);
+            fflush(stderr);
+            logged = true;
+        }
+    }
+
     UpdatePushConstants(cmd, camera);
 
     // With LOD, draw only the mesh at the selected LOD level.

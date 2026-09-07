@@ -145,10 +145,10 @@ void PointCloudRenderAdapter::ExtractPointCloudData(
                 normals[i * 3 + 1] = n[1];
                 normals[i * 3 + 2] = n[2];
             } else {
-                normals[i * 3 + 1] = 1.0f;
+                normals[i * 3 + 2] = 1.0f;
             }
         } else {
-            normals[i * 3 + 1] = 1.0f;
+            normals[i * 3 + 2] = 1.0f;
         }
     }
 

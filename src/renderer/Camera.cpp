@@ -42,8 +42,8 @@ void Camera::SetLookAt(const math::Point3d& eye, const math::Point3d& center,
     double len = std::sqrt(f.x * f.x + f.y * f.y + f.z * f.z);
     if (len > 1e-10) { f.x /= len; f.y /= len; f.z /= len; }
 
-    yaw_ = std::atan2(f.x, f.z) * 180.0 / M_PI;
-    pitch_ = std::asin(f.y) * 180.0 / M_PI;
+    yaw_ = std::atan2(f.x, f.y) * 180.0 / M_PI;
+    pitch_ = std::asin(f.z) * 180.0 / M_PI;
 
     dirty_ = true;
 }
@@ -65,7 +65,7 @@ void Camera::MoveRight(double distance) {
 }
 
 void Camera::MoveUp(double distance) {
-    position_.y += distance;
+    position_.z += distance;
     dirty_ = true;
 }
 
@@ -115,16 +115,16 @@ void Camera::FocusOnBounds(const spatial::BoundingBox& bounds, double padding) {
 
     double dist = maxDim * padding / std::tan(fovY_ * 0.5 * M_PI / 180.0);
 
-    // Retreat along whichever of X/Z the scene is thinnest on, not always Z.
-    // Backing off along a fixed axis meant a scan whose tallest extent was Z
+    // Retreat along whichever of X/Y the scene is thinnest on, not always Y.
+    // Backing off along a fixed axis meant a scan whose tallest extent was Y
     // (a facade, a pole, anything not flat terrain) put the camera end-on
     // down its own longest dimension, showing only the thin cross-section -
-    // which looked like it needed heavy zooming in to see anything. Y is
-    // deliberately excluded: worldUp_ is fixed at {0,1,0}, and retreating
+    // which looked like it needed heavy zooming in to see anything. Z is
+    // deliberately excluded: worldUp_ is fixed at {0,0,1}, and retreating
     // along the up axis makes forward parallel to up, which zeroes out
     // GetRight()'s cross product and breaks the view matrix.
-    math::Point3d eye = (dx <= dz) ? math::Point3d{cx - dist, cy, cz}
-                                    : math::Point3d{cx, cy, cz - dist};
+    math::Point3d eye = (dx <= dy) ? math::Point3d{cx - dist, cy, cz}
+                                    : math::Point3d{cx, cy - dist, cz};
 
     // SetLookAt() keeps yaw_/pitch_ (which ComputeViewMatrix() actually reads
     // via GetForward()) consistent with position_/target_; setting those two
@@ -132,33 +132,84 @@ void Camera::FocusOnBounds(const spatial::BoundingBox& bounds, double padding) {
     SetLookAt(eye, {cx, cy, cz}, worldUp_);
 }
 
+void Camera::SetTopView(const spatial::BoundingBox& bounds, double padding) {
+    double cx = (bounds.minX + bounds.maxX) * 0.5;
+    double cy = (bounds.minY + bounds.maxY) * 0.5;
+    double cz = (bounds.minZ + bounds.maxZ) * 0.5;
+
+    double dx = (bounds.maxX - bounds.minX);
+    double dy = (bounds.maxY - bounds.minY);
+    double halfExtent = std::max(dx, dy) * 0.5 * padding;
+    if (halfExtent <= 0.0) halfExtent = 1.0;
+
+    // Place camera directly above center, looking straight down (-Z).
+    double camDist = halfExtent * 2.0;
+    math::Point3d eye = {cx, cy, cz + camDist};
+
+    // Orthographic projection fitted to XY footprint.
+    // Flip Y axis (bottom=+halfExtent, top=-halfExtent) to match perspective
+    // projection's Y flip convention (vulkan clip-space Y up = +Y on screen).
+    SetOrthographic(-halfExtent, halfExtent, halfExtent, -halfExtent,
+                    0.1, camDist * 10.0);
+
+    // Look straight down: yaw=0, pitch=-90 gives forward = (0, 0, -1).
+    // Do NOT call SetLookAt here — it overwrites worldUp_ which permanently
+    // breaks Z-up navigation.  Set the camera state directly so worldUp_
+    // remains {0, 0, 1}.
+    position_ = eye;
+    target_ = {cx, cy, cz};
+    yaw_ = 0.0;
+    pitch_ = -90.0;
+    dirty_ = true;
+}
+
 math::Point3d Camera::GetForward() const {
     double yawRad = yaw_ * M_PI / 180.0;
     double pitchRad = pitch_ * M_PI / 180.0;
     return {
         std::cos(pitchRad) * std::sin(yawRad),
-        std::sin(pitchRad),
-        std::cos(pitchRad) * std::cos(yawRad)
+        std::cos(pitchRad) * std::cos(yawRad),
+        std::sin(pitchRad)
     };
 }
 
 math::Point3d Camera::GetRight() const {
     math::Point3d fwd = GetForward();
-    return {
+    math::Point3d right = {
         fwd.y * worldUp_.z - fwd.z * worldUp_.y,
         fwd.z * worldUp_.x - fwd.x * worldUp_.z,
         fwd.x * worldUp_.y - fwd.y * worldUp_.x
     };
+    double len = std::sqrt(right.x * right.x + right.y * right.y + right.z * right.z);
+    if (len < 1e-6) {
+        // Forward is parallel to worldUp (e.g. top view in Z-up: fwd=(0,0,-1),
+        // worldUp=(0,0,1)).  Pick a fallback perpendicular to forward.
+        // For Z-up top-down (fwd.z ≈ -1), use +Y as fallback to get Right=+X, Up=+Y.
+        math::Point3d fallback = (std::fabs(fwd.z) < 0.9)
+            ? math::Point3d{0, 0, 1}
+            : math::Point3d{0, 1, 0};
+        right = {
+            fwd.y * fallback.z - fwd.z * fallback.y,
+            fwd.z * fallback.x - fwd.x * fallback.z,
+            fwd.x * fallback.y - fwd.y * fallback.x
+        };
+        len = std::sqrt(right.x * right.x + right.y * right.y + right.z * right.z);
+    }
+    if (len > 1e-10) { right.x /= len; right.y /= len; right.z /= len; }
+    return right;
 }
 
 math::Point3d Camera::GetUp() const {
     math::Point3d right = GetRight();
     math::Point3d fwd = GetForward();
-    return {
+    math::Point3d up = {
         right.y * fwd.z - right.z * fwd.y,
         right.z * fwd.x - right.x * fwd.z,
         right.x * fwd.y - right.y * fwd.x
     };
+    double len = std::sqrt(up.x * up.x + up.y * up.y + up.z * up.z);
+    if (len > 1e-10) { up.x /= len; up.y /= len; up.z /= len; }
+    return up;
 }
 
 const math::Matrix4d& Camera::GetViewMatrix() const {
@@ -208,10 +259,12 @@ math::Matrix4d Camera::ComputeProjectionMatrix() const {
         double rl = orthoRight_ - orthoLeft_;
         double tb = orthoTop_ - orthoBottom_;
         double fn = farClip_ - nearClip_;
+        // Vulkan NDC depth range is [0, 1] (not OpenGL's [-1, 1]).
+        // Map view-space Z ∈ [-near, -far] → clip Z ∈ [0, 1].
         return math::Matrix4d(
             2.0 / rl, 0, 0, -(orthoRight_ + orthoLeft_) / rl,
             0, 2.0 / tb, 0, -(orthoTop_ + orthoBottom_) / tb,
-            0, 0, -2.0 / fn, -(farClip_ + nearClip_) / fn,
+            0, 0, -1.0 / fn, -nearClip_ / fn,
             0, 0, 0, 1
         );
     }

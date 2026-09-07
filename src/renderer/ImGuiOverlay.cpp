@@ -92,7 +92,16 @@ void ImGuiOverlay::RenderDebugPanel(RenderContext& context) {
 
     auto& cam = context.GetCamera();
     auto pos = cam.GetPosition();
-    ImGui::Text("Camera: (%.1f, %.1f, %.1f)", pos.x, pos.y, pos.z);
+    auto tgt = cam.GetTarget();
+    auto fwd = cam.GetForward();
+    auto right = cam.GetRight();
+    auto up = cam.GetUp();
+    ImGui::Text("[Z-UP Camera]");
+    ImGui::Text("Position: (%.1f, %.1f, %.1f)", pos.x, pos.y, pos.z);
+    ImGui::Text("Target:   (%.1f, %.1f, %.1f)", tgt.x, tgt.y, tgt.z);
+    ImGui::Text("Forward:  (%.4f, %.4f, %.4f)", fwd.x, fwd.y, fwd.z);
+    ImGui::Text("Right:    (%.4f, %.4f, %.4f)", right.x, right.y, right.z);
+    ImGui::Text("Up:       (%.4f, %.4f, %.4f)", up.x, up.y, up.z);
     ImGui::Text("FOV: %.1f", cam.GetFOV());
 
     ImGui::End();

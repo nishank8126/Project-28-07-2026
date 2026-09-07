@@ -29,6 +29,7 @@
 
 #include <memory>
 #include <vector>
+#include <unordered_set>
 
 namespace workstation {
 namespace renderer {
@@ -182,9 +183,14 @@ private:
     VkPipeline debugPipeline_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     VkPipeline cadLinePipeline_ = VK_NULL_HANDLE;
+    VkPipeline cullingComputePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pointPipelineLayout_ = VK_NULL_HANDLE;
+    VkPipelineLayout cullingComputePipelineLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout pointDescriptorLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout cullingComputeDescriptorLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pointDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorPool cullingComputeDescriptorPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet cullingComputeDescriptorSet_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> pointDescriptorSets_;
 
     surface::SurfaceInitParams surfaceInitParams_;
@@ -193,6 +199,62 @@ private:
     VkDescriptorSet classificationDescriptorSet_ = VK_NULL_HANDLE;
     bool hasCustomPalette_ = false;
     display::ClassPalette customPalette_;
+
+    // GPU compute culling buffers (interleaved PointVertex SSBOs)
+    vulkan::GPUBuffer cullingInputBuffer_;
+    vulkan::GPUBuffer cullingOutputBuffer_;
+    vulkan::GPUBuffer cullingIndirectBuffer_;
+    uint32_t cullingTotalPoints_ = 0;
+    bool cullingBuffersDirty_ = true;
+
+    // Frame performance profiling
+    struct FramePerf {
+        double cpuInputMs = 0;
+        double cpuVisibilityMs = 0;
+        double cpuLODMs = 0;
+        double cpuStreamingMs = 0;
+        double cpuSurfaceMs = 0;
+        double cpuCmdRecordMs = 0;
+        double cpuSubmitMs = 0;
+        double cpuTotalMs = 0;
+        double gpuComputeMs = 0;
+        double gpuRenderMs = 0;
+        double gpuTotalMs = 0;
+        uint64_t totalPoints = 0;
+        uint64_t visiblePoints = 0;
+        uint64_t renderedPoints = 0;
+        uint64_t discardedPoints = 0;
+        uint32_t visibleNodes = 0;
+        uint32_t culledNodes = 0;
+        uint32_t totalNodes = 0;
+        uint32_t drawCalls = 0;
+        uint32_t indirectDraws = 0;
+        uint32_t gpuCullingDispatches = 0;
+        uint32_t lodLevelDistribution[5] = {0,0,0,0,0};
+        uint64_t ramUsed = 0;
+        uint64_t vramUsed = 0;
+        uint64_t vramAvailable = 0;
+        uint64_t residentPoints = 0;
+        uint32_t loadedTiles = 0;
+    } framePerf_;
+    std::chrono::high_resolution_clock::time_point cpuStageStart_;
+
+    // GPU timestamp queries
+    VkQueryPool timestampQueryPool_ = VK_NULL_HANDLE;
+    static constexpr uint32_t kTimestampQueriesPerFrame = 4;
+    static constexpr uint32_t kMaxTimestampFrames = 4;
+    float timestampPeriodMs_ = 0.0f;
+    bool timestampsSupported_ = false;
+    struct TimestampFrame {
+        bool written = false;
+        uint64_t timestamps[kTimestampQueriesPerFrame] = {};
+        double gpuComputeMs = 0.0;
+        double gpuRenderMs = 0.0;
+        double gpuSurfaceMs = 0.0;
+        double gpuTotalMs = 0.0;
+    };
+    TimestampFrame timestampFrames_[kMaxTimestampFrames] = {};
+    uint32_t timestampFrameIndex_ = 0;
 
     pointcloud::PointCloud* activeCloud_ = nullptr;
 
@@ -214,6 +276,7 @@ private:
     bool CreateRenderPass();
     bool CreateFramebuffers();
     bool CreatePointPipeline();
+    bool CreateComputePipeline();
     bool CreateDebugPipeline();
     bool CreateLinePipeline();
     bool CreateCadLinePipeline();
@@ -228,6 +291,10 @@ private:
     void PerformLODSelection();
     void ProcessStreamingRequests();
     void UpdateGPUResidency();
+    void DispatchCullingComputeShader();
+    void BuildCullingBuffers();
+    void ReadTimestampQueries();
+    void RecordIndirectDrawCommands(uint32_t nodeCount);
     void DrawVisibleNodes(VkCommandBuffer cmd);
     void DrawSelectedNodes(VkCommandBuffer cmd);
     void DrawResidentNodes(VkCommandBuffer cmd);

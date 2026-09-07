@@ -146,6 +146,7 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
 
     auto* xyzChannel = cloud.Root()->channels().GetChannel(pointcloud::ChannelId::XYZ);
     auto* rgbChannel = cloud.Root()->channels().GetChannel(pointcloud::ChannelId::RGB);
+    auto* clsChannel = cloud.Root()->channels().GetChannel(pointcloud::ChannelId::Classification);
     if (!xyzChannel || !rgbChannel) return;
 
     const size_t pointCount = xyzChannel->Count();
@@ -172,10 +173,11 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
     // ReadRGB accessor, which just returns raw bytes of the float data
     // reinterpreted as color components - not the actual decoded colour.
     std::vector<float> px, py, pz;
-    std::vector<uint8_t> pr, pg, pb;
+    std::vector<uint8_t> pr, pg, pb, classifications;
     size_t reserveHint = pointCount / stride + 1;
     px.reserve(reserveHint); py.reserve(reserveHint); pz.reserve(reserveHint);
     pr.reserve(reserveHint); pg.reserve(reserveHint); pb.reserve(reserveHint);
+    classifications.reserve(reserveHint);
 
     double minX = std::numeric_limits<double>::max();
     double minY = std::numeric_limits<double>::max();
@@ -203,6 +205,12 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
         py.push_back(static_cast<float>(xyz[1]));
         pz.push_back(static_cast<float>(xyz[2]));
         pr.push_back(rgb8[0]); pg.push_back(rgb8[1]); pb.push_back(rgb8[2]);
+
+        uint8_t cls = 0;
+        if (clsChannel) {
+            channels.ReadClassification(i, cls);
+        }
+        classifications.push_back(cls);
 
         minX = std::min(minX, xyz[0]); maxX = std::max(maxX, xyz[0]);
         minY = std::min(minY, xyz[1]); maxY = std::max(maxY, xyz[1]);
@@ -261,6 +269,7 @@ void SurfaceMeshGenerator::AssignVertexColors(SurfaceMesh& mesh, pointcloud::Poi
             v.color[0] = pr[bestIdx] / 255.0f;
             v.color[1] = pg[bestIdx] / 255.0f;
             v.color[2] = pb[bestIdx] / 255.0f;
+            v.classificationID = classifications[bestIdx];
         }
         // Not found: point is outside the indexed extent, keep the mesh's
         // seeded mid-grey colour (same visual as the no-RGB path).
@@ -287,12 +296,27 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
     ts.adaptive = params.adaptiveTriangulation;
     ts.maxEdgeLength = params.maxEdgeLength;
     ts.pointSpacing = params.pointSpacing;
+    ts.maxElevationJump = params.maxElevationJump;
 
     const auto tTri = std::chrono::steady_clock::now();
     auto mesh = triangulator_.Triangulate(points, ts);
     mesh.ComputeBounds();
     lastStats_.triangulationTimeMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tTri).count();
+
+    // Record triangle validation stats
+    lastStats_.trianglesBeforeValidation = triangulator_.GetTrianglesBeforeValidation();
+    lastStats_.trianglesAfterEdgeFilter = triangulator_.GetTrianglesAfterEdgeFilter();
+    lastStats_.trianglesAfterZFilter = triangulator_.GetTrianglesAfterZFilter();
+
+    fprintf(stderr,
+        "[SurfaceGen] Triangles before validation: %zu\n"
+        "[SurfaceGen] Triangles after edge filter: %zu\n"
+        "[SurfaceGen] Triangles after Z-filter:   %zu\n",
+        lastStats_.trianglesBeforeValidation,
+        lastStats_.trianglesAfterEdgeFilter,
+        lastStats_.trianglesAfterZFilter);
+    fflush(stderr);
 
     if (params.computeNormals) {
         // Flat per-face normals (with vertex duplication) rather than
@@ -324,6 +348,11 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
     fprintf(stderr, "[SurfaceGen] Filtered points: %zu\n", lastStats_.filteredPointCount);
     fprintf(stderr, "[SurfaceGen] Output vertices: %u\n", lastStats_.vertexCount);
     fprintf(stderr, "[SurfaceGen] Triangles: %u\n", lastStats_.triangleCount);
+    fprintf(stderr, "[SurfaceGen] Triangles before validation: %zu\n", lastStats_.trianglesBeforeValidation);
+    fprintf(stderr, "[SurfaceGen] Triangles rejected (edge): %zu\n",
+            lastStats_.trianglesBeforeValidation - lastStats_.trianglesAfterEdgeFilter);
+    fprintf(stderr, "[SurfaceGen] Triangles rejected (Z-jump): %zu\n",
+            lastStats_.trianglesAfterEdgeFilter - lastStats_.trianglesAfterZFilter);
     fprintf(stderr, "[SurfaceGen] Normals computed: %s\n", params.computeNormals ? "yes" : "no");
     const auto& b = mesh.GetBounds();
     fprintf(stderr, "[SurfaceGen] Bounds: min(%.2f, %.2f, %.2f) max(%.2f, %.2f, %.2f)\n",

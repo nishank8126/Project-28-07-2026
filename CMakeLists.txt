@@ -335,7 +335,7 @@ if(GLSLC)
     set(SHADER_SRC_DIR ${CMAKE_SOURCE_DIR}/shaders)
     set(SHADER_DST_DIR ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${SHADER_DST_DIR})
-    foreach(SHADER point.vert point.frag line.vert line.frag debug_point.vert debug_point.frag point_classification.frag point_height.frag point_intensity.frag point_normal.frag cad_line.vert cad_line.frag cad_point.vert cad_point.frag cad_surface.vert cad_surface.frag picking.vert picking.frag selection.vert selection.frag surface.vert surface.frag)
+    foreach(SHADER point.vert point.frag line.vert line.frag debug_point.vert debug_point.frag point_classification.frag point_height.frag point_intensity.frag point_normal.frag cad_line.vert cad_line.frag cad_point.vert cad_point.frag cad_surface.vert cad_surface.frag picking.vert picking.frag selection.vert selection.frag surface.vert surface.frag point_culling.comp)
         add_custom_command(
             OUTPUT ${SHADER_DST_DIR}/${SHADER}.spv
             COMMAND ${GLSLC} ${SHADER_SRC_DIR}/${SHADER} -o ${SHADER_DST_DIR}/${SHADER}.spv
@@ -351,7 +351,8 @@ if(GLSLC)
         ${SHADER_DST_DIR}/cad_surface.vert.spv ${SHADER_DST_DIR}/cad_surface.frag.spv
         ${SHADER_DST_DIR}/picking.vert.spv ${SHADER_DST_DIR}/picking.frag.spv
         ${SHADER_DST_DIR}/selection.vert.spv ${SHADER_DST_DIR}/selection.frag.spv
-        ${SHADER_DST_DIR}/surface.vert.spv ${SHADER_DST_DIR}/surface.frag.spv)
+        ${SHADER_DST_DIR}/surface.vert.spv ${SHADER_DST_DIR}/surface.frag.spv
+        ${SHADER_DST_DIR}/point_culling.comp.spv)
     add_dependencies(wk_renderer shaders)
     # wk_gui reads its shaders from the same CMAKE_BINARY_DIR/shaders/ output
     # (see Renderer::CreatePointPipeline's GetExeShaderDir()) -- without this,

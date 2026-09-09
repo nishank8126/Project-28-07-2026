@@ -3,8 +3,10 @@
 #include "workstation/pointcloud/PointCloudNode.h"
 #include "workstation/pointcloud/PointAttributeChannel.h"
 #include "workstation/pointcloud/BoundingBox.h"
+#include "workstation/pointcloud/VoxelNode.h"
 #include "workstation/spatial/CoordinateNormalizationManager.h"
 #include "workstation/spatial/OctreeBuilder.h"
+#include "workstation/spatial/Octree.h"
 
 #include <laszip_api.h>
 
@@ -32,6 +34,71 @@ bool PointFormatHasColor(laszip_U8 pointDataFormat) {
 std::string BaseName(const std::string& path) {
     size_t pos = path.find_last_of("/\\");
     return pos == std::string::npos ? path : path.substr(pos + 1);
+}
+
+// ---------------------------------------------------------------------------
+// Convert a spatial::OctreeNode tree into a VoxelNode/PointCloudNode hierarchy.
+// Leaf OctreeNodes become PointCloudNode with sliced point data.
+// Internal OctreeNodes become VoxelNode with children.
+// ---------------------------------------------------------------------------
+std::unique_ptr<PointCloudNode> ConvertOctreeNode(
+    const spatial::OctreeNode* src,
+    const std::vector<float>& positions,
+    const std::vector<float>& colors,
+    const std::vector<float>& intensities,
+    const std::vector<uint8_t>& classifications,
+    uint32_t& outNodeCount,
+    uint32_t& outLeafCount)
+{
+    if (!src) return nullptr;
+
+    outNodeCount++;
+
+    if (src->IsLeaf()) {
+        outLeafCount++;
+        auto node = std::make_unique<PointCloudNode>();
+        node->setBounds(src->bounds);
+
+        uint32_t offset = src->pointOffset;
+        uint32_t count = src->pointCount;
+        if (count == 0) return nullptr;
+
+        // Copy point slice from flat arrays into this node's channels
+        node->channels().AddChannel(CreateChannel(
+            ChannelId::XYZ, PointFormat::Float32, count,
+            positions.data() + offset * 3));
+        node->channels().AddChannel(CreateChannel(
+            ChannelId::RGB, PointFormat::Float32, count,
+            colors.data() + offset * 3));
+        node->channels().AddChannel(CreateChannel(
+            ChannelId::Intensity, PointFormat::Float32, count,
+            intensities.data() + offset));
+        node->channels().AddChannel(CreateChannel(
+            ChannelId::Classification, PointFormat::UInt8, count,
+            classifications.data() + offset));
+
+        return node;
+    }
+
+    // Internal node → VoxelNode with children
+    auto voxel = std::make_unique<VoxelNode>();
+    voxel->setBounds(src->bounds);
+    // Internal nodes carry aggregate point count in totalPoints
+    // (no channel data — only leaves have point data)
+
+    for (int i = 0; i < 8; ++i) {
+        if (src->children[i]) {
+            auto child = ConvertOctreeNode(
+                src->children[i].get(), positions, colors, intensities,
+                classifications, outNodeCount, outLeafCount);
+            if (child) {
+                child->setParent(voxel.get());
+                voxel->AddChild(std::move(child));
+            }
+        }
+    }
+
+    return voxel;
 }
 
 } // namespace
@@ -210,23 +277,37 @@ bool LoadLasFile(const std::string& filepath, PointCloud& outCloud, std::string*
         cloudPtr->SetOctreeStats(nodeCount, leafCount, maxDepth);
     }
 
-    auto node = std::make_unique<PointCloudNode>();
-    node->setBounds(bounds);
+    // Build VoxelNode hierarchy from the OctreeNode tree.
+    // This gives PreparePointCloud and BuildSpatialTreeFromCloud the
+    // recursive VoxelNode hierarchy they need for multi-node rendering.
+    uint32_t convertedNodes = 0;
+    uint32_t convertedLeaves = 0;
+    auto root = ConvertOctreeNode(
+        octreeRoot, positions, colors, intensities, classifications,
+        convertedNodes, convertedLeaves);
 
-    node->channels().AddChannel(CreateChannel(
-        ChannelId::XYZ, PointFormat::Float32, readCount, positions.data()));
-    node->channels().AddChannel(CreateChannel(
-        ChannelId::RGB, PointFormat::Float32, readCount, colors.data()));
-    node->channels().AddChannel(CreateChannel(
-        ChannelId::Intensity, PointFormat::Float32, readCount, intensities.data()));
-    node->channels().AddChannel(CreateChannel(
-        ChannelId::Classification, PointFormat::UInt8, readCount, classifications.data()));
+    if (!root) {
+        // Fallback: flat root (should not happen with valid octree)
+        auto flat = std::make_unique<PointCloudNode>();
+        flat->setBounds(bounds);
+        flat->channels().AddChannel(CreateChannel(
+            ChannelId::XYZ, PointFormat::Float32, readCount, positions.data()));
+        flat->channels().AddChannel(CreateChannel(
+            ChannelId::RGB, PointFormat::Float32, readCount, colors.data()));
+        flat->channels().AddChannel(CreateChannel(
+            ChannelId::Intensity, PointFormat::Float32, readCount, intensities.data()));
+        flat->channels().AddChannel(CreateChannel(
+            ChannelId::Classification, PointFormat::UInt8, readCount, classifications.data()));
+        root = std::move(flat);
+    }
 
     outCloud.SetName(BaseName(filepath).c_str());
-    outCloud.SetRoot(node.release());
+    outCloud.SetRoot(root.release());
     outCloud.Finalize();
 
     fprintf(stderr, "[LasFileReader] Loaded %zu points from %s\n", readCount, filepath.c_str());
+    fprintf(stderr, "[LasFileReader] Octree hierarchy: %u nodes (%u leaves)\n",
+            convertedNodes, convertedLeaves);
     fprintf(stderr, "[LasFileReader] First XYZ: (%.3f, %.3f, %.3f)\n",
             positions[0], positions[1], positions[2]);
     fprintf(stderr, "[LasFileReader] Bounds: min=(%.3f, %.3f, %.3f) max=(%.3f, %.3f, %.3f)\n",

@@ -320,7 +320,13 @@ void SurfaceRenderer::UpdatePushConstants(VkCommandBuffer cmd,
         0,0,1,0,
         0,0,0,1
     };
-    memcpy(pc.model, identity, sizeof(identity));
+    // Apply vertical exaggeration by scaling Z in the model matrix.
+    // This amplifies terrain relief without modifying source coordinates.
+    float veg = params_.verticalExaggeration;
+    float model[16];
+    memcpy(model, identity, sizeof(identity));
+    model[10] = veg;  // scale Z
+    memcpy(pc.model, model, sizeof(model));
 
     auto& view = camera.GetViewMatrix();
     for (int c = 0; c < 4; ++c)

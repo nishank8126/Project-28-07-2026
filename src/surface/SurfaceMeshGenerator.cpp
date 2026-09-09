@@ -319,13 +319,23 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
     fflush(stderr);
 
     if (params.computeNormals) {
-        // Flat per-face normals (with vertex duplication) rather than
-        // NormalEstimator's kNN-smoothed per-vertex normals: this is what
-        // produces the faceted hillshade look instead of a smoothly lit
-        // blob. Edges must be recomputed afterwards since triangle vertex
-        // indices change.
         const auto tNormal = std::chrono::steady_clock::now();
-        FlattenFaceNormals(mesh);
+        if (params.smoothNormals) {
+            // Smooth area-weighted vertex normals via NormalEstimator.
+            // Each vertex gets the area-weighted average of its incident
+            // triangle normals -- produces the professional MicroStation /
+            // TerraScan look where terrain flows continuously across facets.
+            NormalEstimationParams nep;
+            nep.neighborRadius = params.normalNeighborRadius;
+            nep.neighborCount = params.normalNeighborCount;
+            normalEstimator_.ComputeNormals(mesh, nep);
+        } else {
+            // Flat per-face normals (with vertex duplication) -- the
+            // "faceted crystalline" look.  Each triangle gets its own
+            // copy of its vertices so every face can carry a distinct
+            // face normal.
+            FlattenFaceNormals(mesh);
+        }
         lastStats_.normalTimeMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tNormal).count();
     }
@@ -360,6 +370,60 @@ SurfaceMesh SurfaceMeshGenerator::Generate(pointcloud::PointCloud& cloud,
     fprintf(stderr, "[SurfaceGen] Timing: total=%.1fms triang=%.1fms normals=%.1fms color=%.1fms\n",
             lastStats_.generationTimeMs, lastStats_.triangulationTimeMs,
             lastStats_.normalTimeMs, lastStats_.colorTimeMs);
+
+    // [SURFACE QUALITY] - verify Z preservation and terrain detail
+    {
+        const auto& verts = mesh.Vertices();
+        if (!verts.empty()) {
+            double minZ = verts[0].position[2];
+            double maxZ = verts[0].position[2];
+            double sumZ = 0.0;
+            double sumNz = 0.0;
+            float minNz = 1.0f;
+            for (const auto& v : verts) {
+                double z = v.position[2];
+                if (z < minZ) minZ = z;
+                if (z > maxZ) maxZ = z;
+                sumZ += z;
+                double nz = v.normal[2];
+                sumNz += nz;
+                if (nz < minNz) minNz = static_cast<float>(nz);
+            }
+            double meanZ = sumZ / verts.size();
+            double sumSq = 0.0;
+            for (const auto& v : verts) {
+                double dz = v.position[2] - meanZ;
+                sumSq += dz * dz;
+            }
+            double stddevZ = std::sqrt(sumSq / verts.size());
+            double meanNz = sumNz / verts.size();
+            fprintf(stderr,
+                "[SURFACE QUALITY]\n"
+                "  Input points: %zu\n"
+                "  Filtered points: %zu\n"
+                "  Vertices: %zu\n"
+                "  Triangles: %u\n"
+                "  Min Z: %.3f\n"
+                "  Max Z: %.3f\n"
+                "  Z Range: %.3f\n"
+                "  Mean Z: %.3f\n"
+                "  Std deviation: %.3f\n"
+                "  Mean Nz: %.4f (1.0=flat, <1.0=sloped)\n"
+                "  Min Nz: %.4f (max slope)\n"
+                "  Normals: %s\n"
+                "  Timing: total=%.1fms\n",
+                lastStats_.inputPointCount,
+                lastStats_.filteredPointCount,
+                verts.size(),
+                lastStats_.triangleCount,
+                minZ, maxZ, maxZ - minZ,
+                meanZ, stddevZ,
+                meanNz, minNz,
+                params.smoothNormals ? "smooth" : "flat",
+                lastStats_.generationTimeMs);
+            fflush(stderr);
+        }
+    }
     fflush(stderr);
 
     return mesh;

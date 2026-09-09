@@ -30,6 +30,30 @@ vec3 applyPhong(vec3 normal, vec3 lightDir, vec3 /*viewDir*/, vec3 color) {
     return color * shade;
 }
 
+// Smooth terrain hillshade: gentle contrast for MicroStation/TerraScan-style
+// professional LiDAR rendering. Uses smoothstep for softer transitions
+// and a power-curve contrast for subtle relief without harsh edges.
+// Final: PTCColor × terrainLighting (never replaces PTC color).
+vec3 applySmoothHillshade(vec3 normal, vec3 lightDir, vec3 color) {
+    float ambientFloor = fragMaterial.x;
+    float NdotL = max(dot(normal, lightDir), 0.0);
+    // Strong contrast: dark slopes stay dark, lit slopes bright
+    float shade = smoothstep(0.0, 1.0, NdotL);
+    // Power curve: 0.5 brightens mid-tones for better terrain visibility
+    shade = pow(shade, 0.5);
+    // Final: PTCColor × terrainLighting
+    return color * mix(ambientFloor, 1.0, shade);
+}
+
+// Ambient occlusion factor based on normal divergence at triangle edges.
+// Where neighbouring vertices have divergent normals (crevices, concavities),
+// the surface is occluded. Subtle darkening (0.7-1.0) adds depth without
+// affecting flat terrain.
+float ComputeAO(vec3 normal) {
+    float crevice = clamp(length(fwidth(normal)) * 1.5, 0.0, 1.0);
+    return mix(1.0, 0.7, crevice);
+}
+
 // Full Blinn-Phong: ambient + diffuse + specular, driven by the user's
 // material weights (fragMaterial = ambient/diffuse/specular/shininess).
 // Used by the MicroStation-style PTC modes so the base classification color
@@ -74,22 +98,27 @@ vec3 applyEDL(vec3 color, vec3 normal, vec3 viewDir) {
     // Stronger depth contrast: bias toward edge darkening for better
     // terrain crevice and building edge separation
     float edgeFactor = clamp(normalTerm * 0.6 + depthDiscontinuity * 0.6, 0.0, 1.0);
+    // Smooth edge falloff for professional look
+    edgeFactor = smoothstep(0.0, 1.0, edgeFactor);
     return color * (1.0 - edgeFactor * edlStrength * 0.6);
 }
 
-// Elevation colormap: 5-stop professional terrain ramp
-// blue -> cyan -> green -> yellow -> red
+// Professional terrain elevation colormap: 6-stop ramp
+// dark blue -> cyan -> green -> yellow -> orange -> red
+// Optimized for LiDAR terrain visualization with good contrast
 vec3 ElevationColormap(float t) {
     t = clamp(t, 0.0, 1.0);
-    const vec3 c0 = vec3(0.0, 0.0, 0.8);  // deep blue
-    const vec3 c1 = vec3(0.0, 0.8, 0.8);  // cyan
-    const vec3 c2 = vec3(0.0, 0.8, 0.0);  // green
-    const vec3 c3 = vec3(1.0, 1.0, 0.0);  // yellow
-    const vec3 c4 = vec3(1.0, 0.0, 0.0);  // red
-    if (t < 0.25) return mix(c0, c1, t * 4.0);
-    if (t < 0.50) return mix(c1, c2, (t - 0.25) * 4.0);
-    if (t < 0.75) return mix(c2, c3, (t - 0.50) * 4.0);
-    return mix(c3, c4, (t - 0.75) * 4.0);
+    const vec3 c0 = vec3(0.0, 0.0, 0.7);   // deep blue (lowest)
+    const vec3 c1 = vec3(0.0, 0.6, 0.8);   // cyan
+    const vec3 c2 = vec3(0.1, 0.75, 0.2);  // green
+    const vec3 c3 = vec3(1.0, 1.0, 0.0);   // yellow
+    const vec3 c4 = vec3(1.0, 0.5, 0.0);   // orange
+    const vec3 c5 = vec3(0.9, 0.1, 0.1);   // red (highest)
+    if (t < 0.2) return mix(c0, c1, t * 5.0);
+    if (t < 0.4) return mix(c1, c2, (t - 0.2) * 5.0);
+    if (t < 0.6) return mix(c2, c3, (t - 0.4) * 5.0);
+    if (t < 0.8) return mix(c3, c4, (t - 0.6) * 5.0);
+    return mix(c4, c5, (t - 0.8) * 5.0);
 }
 
 // Compute normal from world-space position derivatives.
@@ -173,20 +202,25 @@ void main() {
         // Wireframe / unlit / edge color
         color = fragColor;
     } else if (mode < 6.5) {
-        // Elevation Heatmap
+        // Elevation Heatmap: professional terrain color ramp
         float elevMin = fragShadingParams.y;
         float elevMax = fragShadingParams.z;
         float h = clamp((fragWorldPos.z - elevMin) /
                          (elevMax - elevMin + 0.001), 0.0, 1.0);
         color = ElevationColormap(h);
     } else if (mode < 7.5) {
-        // Hillshade: elevation colormap + Phong lighting
+        // Hillshade: elevation colormap + strong terrain relief lighting
         float elevMin = fragShadingParams.y;
         float elevMax = fragShadingParams.z;
         float h = clamp((fragWorldPos.z - elevMin) /
                          (elevMax - elevMin + 0.001), 0.0, 1.0);
         vec3 N2 = ComputeNormalFromPosition(fragWorldPos, N);
-        color = applyPhong(N2, L, V, ElevationColormap(h));
+        // Strong contrast hillshade for visible terrain relief
+        float NdotL = max(dot(N2, L), 0.0);
+        float shade = smoothstep(0.0, 1.0, NdotL);
+        shade = pow(shade, 0.6);  // brighten mid-tones for better contrast
+        vec3 hillColor = ElevationColormap(h) * mix(0.3, 1.0, shade);
+        color = hillColor;
     } else if (mode < 8.5) {
         // Slope: flat=green, steep=red
         vec3 N2 = ComputeNormalFromPosition(fragWorldPos, N);
@@ -198,30 +232,36 @@ void main() {
         float asp = (atan(N2.y, N2.x) + 3.14159) / 6.28318;
         color = ElevationColormap(asp);
     } else if (mode < 10.5) {
-        // Elevation Composite: elevation + hillshade + EDL
+        // Elevation Composite: elevation + hillshade + EDL with strong contrast
         float elevMin = fragShadingParams.y;
         float elevMax = fragShadingParams.z;
         float h = clamp((fragWorldPos.z - elevMin) /
                          (elevMax - elevMin + 0.001), 0.0, 1.0);
         vec3 N2 = ComputeNormalFromPosition(fragWorldPos, N);
-        color = applyPhong(N2, L, V, ElevationColormap(h));
-        color = applyEDL(color, N2, V);
+        float NdotL = max(dot(N2, L), 0.0);
+        float shade = smoothstep(0.0, 1.0, NdotL);
+        shade = pow(shade, 0.6);
+        vec3 hillColor = ElevationColormap(h) * mix(0.3, 1.0, shade);
+        color = applyEDL(hillColor, N2, V);
     } else if (mode < 11.5) {
         // PTC Classification: flat PTC palette colors (base color only)
         color = GetBaseColor();
     } else if (mode < 12.5) {
-        // PTC Hillshade: PTC base color + terrain relief lighting
-        color = applyPhong(ComputeNormalFromPosition(fragWorldPos, N), L, V,
-                           GetBaseColor());
+        // PTC Hillshade: smooth terrain relief with PTC base color
+        vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
+        color = applySmoothHillshade(N2, L, GetBaseColor());
     } else if (mode < 13.5) {
-        // Elevation + PTC Composite: elevation heatmap + PTC tint
+        // Elevation + PTC Composite: elevation heatmap + PTC tint with terrain relief
         float elevMin = fragShadingParams.y;
         float elevMax = fragShadingParams.z;
         float h = clamp((fragWorldPos.z - elevMin) /
                          (elevMax - elevMin + 0.001), 0.0, 1.0);
         vec3 N2 = ComputeNormalFromPosition(fragWorldPos, N);
-        color = applyPhong(N2, L, V, ElevationColormap(h));
-        color = applyEDL(color, N2, V);
+        float NdotL = max(dot(N2, L), 0.0);
+        float shade = smoothstep(0.0, 1.0, NdotL);
+        shade = pow(shade, 0.6);
+        vec3 hillColor = ElevationColormap(h) * mix(0.3, 1.0, shade);
+        color = applyEDL(hillColor, N2, V);
         // Tint with PTC classification
         int cls = int(fragClassificationID);
         cls = clamp(cls, 0, 255);
@@ -230,31 +270,27 @@ void main() {
             color = color * col.rgb;
         }
     } else if (mode < 14.5) {
-        // PTC Shading (MicroStation-style): PTC classification color stays as
-        // the base color; Phong lighting adds depth, lighting and relief on
-        // top. The classification hue is NEVER replaced by grey/material.
-        // Use vertex normal directly for SurfaceMeshGenerator (flat face normals
-        // from FlattenFaceNormals), fall back to derivative normal for ElevationGrid.
+        // PTC Shading (MicroStation-style): smooth terrain hillshade with AO.
+        // Uses smooth hillshade for professional LiDAR look, plus ambient
+        // occlusion for crevice depth. Classification colors remain correct.
         vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
-        color = applyBlinnPhong(N2, L, V, GetBaseColor());
+        color = applySmoothHillshade(N2, L, GetBaseColor());
+        color *= ComputeAO(N2);
     } else if (mode < 15.5) {
-        // PTC + EDL: PTC base color + eye-dome lighting edge darkening.
+        // PTC + EDL: smooth hillshade + AO + eye-dome lighting edge darkening.
         // Improves pole separation, cable visibility and building edges
         // without shifting the palette hue.
         vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
-        color = applyEDL(GetBaseColor(), N2, V);
+        color = applySmoothHillshade(N2, L, GetBaseColor());
+        color *= ComputeAO(N2);
+        color = applyEDL(color, N2, V);
     } else if (mode < 16.5) {
         // PTC Composite (MicroStation/TerraScan look):
-        // PTC color + Phong + EDL + ambient-occlusion-style depth.
+        // PTC color + smooth hillshade + EDL + ambient occlusion.
         vec3 N2 = IsPlaceholderNormal(N) ? ComputeNormalFromPosition(fragWorldPos, N) : N;
-        color = applyBlinnPhong(N2, L, V, GetBaseColor());
+        color = applySmoothHillshade(N2, L, GetBaseColor());
+        color *= ComputeAO(N2);
         color = applyEDL(color, N2, V);
-        // AO-style crevice darkening: where the faceted geometry normal
-        // swings sharply between neighbouring fragments, the surface is
-        // concave (pole/ground joints, cable attachment points) -- darken
-        // those crevices for grounded, occluded depth cues.
-        float crevice = clamp(length(fwidth(N2)) * 2.0, 0.0, 1.0);
-        color *= mix(1.0, 0.55, crevice);
     } else if (mode < 17.5) {
         // DEBUG 1: PTC only (base classification color)
         color = DebugPTCOnly();
@@ -311,6 +347,6 @@ vec3 DebugEDL(vec3 N, vec3 V) {
     return applyEDL(vec3(1.0), N, V);
 }
 vec3 DebugAO(vec3 N) {
-    float crevice = clamp(length(fwidth(N)) * 2.0, 0.0, 1.0);
-    return vec3(1.0 - crevice * 0.5);
+    vec3 N2 = IsPlaceholderNormal(N) ? vec3(0, 0, 1) : N;
+    return vec3(ComputeAO(N2));
 }

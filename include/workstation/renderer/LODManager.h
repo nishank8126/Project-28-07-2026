@@ -23,6 +23,12 @@ struct LODConfig {
     float minNodeScreenSize = 2.0;
     bool lodEnabled = true;
     int32_t forceLODLevel = -1;
+    // Hysteresis thresholds to prevent LOD flickering
+    // Enter lower LOD (more detail) when SSE < enterThreshold
+    // Exit to higher LOD (less detail) when SSE > exitThreshold
+    // exitThreshold > enterThreshold provides hysteresis band
+    double lodEnterThreshold = 20.0;  // SSE below this: increase detail
+    double lodExitThreshold = 30.0;   // SSE above this: decrease detail
 };
 
 struct LODNodeCandidate {
@@ -101,6 +107,7 @@ public:
         uint32_t viewportHeight,
         ViewportPointBudget& budget,
         const pointcloud::PointCloud* cloud,
+        const spatial::SpatialTree* spatialTree,
         VisibilityCache& visCache,
         uint32_t frameNumber);
 
@@ -109,6 +116,7 @@ public:
     uint64_t GetSelectedPointCount() const { return selectedPointCount_; }
     uint32_t GetActiveLODLevel() const { return activeLODLevel_; }
     uint32_t GetBudgetRemaining() const;
+    uint32_t GetNodeLODLevel(uint64_t nodeKey) const;
     LODCache& GetLODCache() { return lodCache_; }
     const LODCache& GetLODCache() const { return lodCache_; }
 

@@ -80,6 +80,26 @@ struct RenderConfig {
     // The default 45/45 reproduces strong directional terrain relief.
     float lightAzimuthDeg = 45.0f;    // 0-360, compass angle of the light
     float lightElevationDeg = 45.0f;  // 0-90, angle above the horizon
+
+    // Vertical relief exaggeration for terrain visualization
+    // 1.0 = real scale, >1.0 amplifies Z for subtle terrain visibility
+    float verticalExaggeration = 1.0f;
+
+    // Performance settings (PHASE 13)
+    enum class PointSizeMode { Auto = 0, Fixed1px = 1, Fixed2px = 2, Fixed3px = 3 };
+    PointSizeMode pointSizeMode = PointSizeMode::Auto;
+    float maxPointSizePx = 4.0f;   // Maximum point size in pixels
+    float minPointSizePx = 1.0f;   // Minimum point size in pixels
+
+    enum class LODQuality { High = 0, Balanced = 1, Performance = 2 };
+    LODQuality lodQuality = LODQuality::Balanced;
+
+    enum class StreamingQuality { Quality = 0, Balanced = 1, Fast = 2 };
+    StreamingQuality streamingQuality = StreamingQuality::Balanced;
+
+    // LOD hysteresis thresholds (PHASE 4)
+    float lodEnterThreshold = 20.0f;   // SSE below this -> increase detail
+    float lodExitThreshold = 30.0f;    // SSE above this -> decrease detail
 };
 
 struct RendererStats {
@@ -100,10 +120,19 @@ struct RendererStats {
     uint32_t indirectDrawCount = 0;
     double gpuComputeTimeMs = 0.0;
     double gpuRenderTimeMs = 0.0;
+    double gpuSurfaceTimeMs = 0.0;
     uint32_t culledNodes = 0;
     uint32_t indirectDraws = 0;
     uint32_t gpuCullingDispatches = 0;
     uint32_t lodLevelDistribution[5] = {0,0,0,0,0};
+    // Enhanced profiling (PHASE 1)
+    uint64_t gpuMemoryTotalBytes = 0;
+    uint32_t uploadsThisFrame = 0;
+    double mbUploadedThisFrame = 0.0;
+    uint32_t tileReuseHits = 0;
+    uint32_t computeCommandsGenerated = 0;
+    uint32_t cpuDrawCalls = 0;
+    double cacheHitRate = 0.0;
 };
 
 struct LODDebugStats {

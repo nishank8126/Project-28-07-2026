@@ -210,6 +210,7 @@ private:
     // Frame performance profiling
     struct FramePerf {
         double cpuInputMs = 0;
+        double cpuCameraMs = 0;
         double cpuVisibilityMs = 0;
         double cpuLODMs = 0;
         double cpuStreamingMs = 0;
@@ -219,6 +220,7 @@ private:
         double cpuTotalMs = 0;
         double gpuComputeMs = 0;
         double gpuRenderMs = 0;
+        double gpuSurfaceMs = 0;
         double gpuTotalMs = 0;
         uint64_t totalPoints = 0;
         uint64_t visiblePoints = 0;
@@ -229,6 +231,7 @@ private:
         uint32_t totalNodes = 0;
         uint32_t drawCalls = 0;
         uint32_t indirectDraws = 0;
+        uint32_t cpuDrawCalls = 0;
         uint32_t gpuCullingDispatches = 0;
         uint32_t lodLevelDistribution[5] = {0,0,0,0,0};
         uint64_t ramUsed = 0;
@@ -236,6 +239,13 @@ private:
         uint64_t vramAvailable = 0;
         uint64_t residentPoints = 0;
         uint32_t loadedTiles = 0;
+        double cacheHitRate = 0.0;
+        uint32_t shadingMode = 0;
+        uint32_t uploadsPerFrame = 0;
+        double mbUploaded = 0.0;
+        uint32_t tileReuseHits = 0;
+        uint32_t computeCommandsGenerated = 0;
+        uint32_t indirectCommandsConsumed = 0;
     } framePerf_;
     std::chrono::high_resolution_clock::time_point cpuStageStart_;
 
@@ -255,6 +265,20 @@ private:
     };
     TimestampFrame timestampFrames_[kMaxTimestampFrames] = {};
     uint32_t timestampFrameIndex_ = 0;
+
+    // GPU hardware info (PHASE 14)
+    struct GPUInfo {
+        char name[256] = "Unknown";
+        uint64_t vramTotal = 0;
+        uint32_t computeUnits = 0;
+        uint32_t maxWorkGroupSize = 0;
+        float maxClockGHz = 0.0f;
+        // Auto-select defaults based on hardware
+        uint32_t defaultPointBudget = 5'000'000;
+        uint32_t defaultGpuBudget = 5'000'000;
+    } gpuInfo_;
+    void DetectGPU();
+    void AutoSelectDefaults();
 
     pointcloud::PointCloud* activeCloud_ = nullptr;
 
@@ -285,7 +309,7 @@ private:
     void DrawCadGeometry(VkCommandBuffer cmd);
     void DrawSurface(VkCommandBuffer cmd);
 
-    void UpdatePushConstants(VkCommandBuffer cmd);
+    void UpdatePushConstants(VkCommandBuffer cmd, uint32_t lodLevel);
     void BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud);
     void PerformVisibilityCulling();
     void PerformLODSelection();

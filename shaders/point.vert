@@ -25,6 +25,7 @@ layout(push_constant) uniform PushConstants {
     float surfaceShininess;
     float edlStrength;
     uint hasCustomPalette;
+    uint lodLevel;
 };
 
 // Classification color storage buffer: 256 × vec4 (RGBA).
@@ -167,11 +168,28 @@ vec3 SafeNormalize(vec3 v, vec3 fallback) {
 }
 
 
+// ---------------------------------------------------------------------------
+// Adaptive point size calculation (shared by all code paths)
+// ---------------------------------------------------------------------------
+float ComputePointSize(float dist) {
+    bool isShadedMode = (visualizationMode == 5u || visualizationMode == 13u ||
+                         (visualizationMode >= 17u && visualizationMode <= 20u) ||
+                         (visualizationMode >= 21u && visualizationMode <= 28u));
+    float maxPointPx = isShadedMode ? 6.0 : 3.0;
+    float lodPointSize;
+    if (lodLevel == 0u) lodPointSize = 3.0;
+    else if (lodLevel == 1u) lodPointSize = 2.0;
+    else if (lodLevel == 2u) lodPointSize = 1.5;
+    else if (lodLevel == 3u) lodPointSize = 1.0;
+    else lodPointSize = 0.8;
+    maxPointPx = min(maxPointPx, lodPointSize);
+    return clamp(pointScale * pointSize / max(1.0, dist), 1.0, maxPointPx);
+}
+
 void main() {
     vec4 pos = vec4(inPosition, 1.0);
 
     if (visualizationMode == 11u) {
-        // DEBUG mode: bypass everything, just project and use fixed size
         gl_Position = viewProjection * pos;
         fragColor = vec4(1.0, 0.0, 0.0, 1.0);
         fragDepth = gl_Position.w;
@@ -186,6 +204,7 @@ void main() {
 
     float dist = length(pos.xyz - cameraPosition.xyz);
 
+    // PHASE 9: Early exits for simple modes (skip lighting math)
     vec4 visualColor;
     switch (visualizationMode) {
         case 0: // RGB
@@ -193,7 +212,7 @@ void main() {
             break;
         case 1: // Intensity
         {
-            float i = clamp((inIntensity - intensityMin) / (intensityMax - intensityMin), 0.0, 1.0);
+            float i = clamp((inIntensity - intensityMin) / max(intensityMax - intensityMin, 0.001), 0.0, 1.0);
             visualColor = vec4(vec3(i), 1.0);
             break;
         }
@@ -210,23 +229,18 @@ void main() {
         }
         case 3: // Elevation
         {
-            float h = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
+            float h = clamp((inPosition.z - elevationMin) / max(elevationMax - elevationMin, 0.001), 0.0, 1.0);
             visualColor = vec4(vec3(h), 1.0);
             break;
         }
         case 4: // Height Ramp
         {
-            float h4 = clamp((inPosition.z - elevationMin) / (elevationMax - elevationMin), 0.0, 1.0);
+            float h4 = clamp((inPosition.z - elevationMin) / max(elevationMax - elevationMin, 0.001), 0.0, 1.0);
             visualColor = vec4(HeightRamp(h4), 1.0);
             break;
         }
         case 5: // Normal Shading
         {
-            // Blinn-Phong (diffuse + specular), matching case 13's material
-            // terms - diffuse alone (the old behaviour here) reads as flat
-            // and dim; the specular highlight is what gives shaded point
-            // clouds that crisp, faceted look (each point's own normal
-            // catches the light differently, like a tiny mirror facet).
             vec3 n = normalize(inNormal);
             vec3 lightDir = normalize(lightDirection.xyz);
             float ndotl = max(dot(n, lightDir), 0.0);
@@ -250,7 +264,7 @@ void main() {
             visualColor = vec4(JetColormap(d), 1.0);
             break;
         }
-        case 13: // Surface Shading (normals + depth composite)
+        case 13: // Surface Shading
         {
             vec3 n = normalize(inNormal);
             vec3 lightDir = normalize(lightDirection.xyz);
@@ -265,11 +279,10 @@ void main() {
             visualColor = vec4(lit, 1.0);
             break;
         }
-        case 14: // Eye-Dome Lighting (simplified per-point)
+        case 14: // Eye-Dome Lighting
         {
             float d = clamp((dist - depthMin) / max(depthMax - depthMin, 0.001), 0.0, 1.0);
             vec3 baseColor = JetColormap(d);
-            // Simplified EDL: darken based on depth gradient estimation
             float depthFactor = 1.0 / (1.0 + dist * 0.001 * edlStrength);
             visualColor = vec4(baseColor * depthFactor, 1.0);
             break;
@@ -285,7 +298,7 @@ void main() {
             }
             break;
         }
-        case 17: // PTC + Phong (MicroStation): PTC base color + Blinn-Phong
+        case 17: // PTC + Phong
         {
             vec3 baseColor = GetPTCBaseColor();
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -295,7 +308,7 @@ void main() {
             visualColor = vec4(ApplyDepthAttenuation(lit, dist), 1.0);
             break;
         }
-        case 18: // PTC + Hillshade: PTC base color + terrain relief lighting
+        case 18: // PTC + Hillshade
         {
             vec3 baseColor = GetPTCBaseColor();
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -303,7 +316,7 @@ void main() {
             visualColor = vec4(ApplyHillshade(baseColor, n, lightDir), 1.0);
             break;
         }
-        case 19: // PTC + EDL: PTC base color + eye-dome separation
+        case 19: // PTC + EDL
         {
             vec3 baseColor = GetPTCBaseColor();
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -311,7 +324,7 @@ void main() {
             visualColor = vec4(ApplyPointEDL(baseColor, n, viewDir, dist), 1.0);
             break;
         }
-        case 20: // PTC Composite: PTC + Phong + EDL + depth attenuation
+        case 20: // PTC Composite
         {
             vec3 baseColor = GetPTCBaseColor();
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -322,30 +335,20 @@ void main() {
             visualColor = vec4(ApplyDepthAttenuation(lit, dist), 1.0);
             break;
         }
-        // ---- TEMPORARY DEBUG MODES (remove after validation) ----
-        // 21: PTC base color only
-        case 21:
-        {
-            visualColor = vec4(GetPTCBaseColor(), 1.0);
-            break;
-        }
-        // 22: Normals visualization
+        case 21: visualColor = vec4(GetPTCBaseColor(), 1.0); break;
         case 22:
         {
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
             visualColor = vec4(n * 0.5 + 0.5, 1.0);
             break;
         }
-        // 23: NdotL lighting factor
         case 23:
         {
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
             vec3 lightDir = SafeNormalize(lightDirection.xyz, vec3(0.0, 0.0, 1.0));
-            float ndotl = max(dot(n, lightDir), 0.0);
-            visualColor = vec4(vec3(ndotl), 1.0);
+            visualColor = vec4(vec3(max(dot(n, lightDir), 0.0)), 1.0);
             break;
         }
-        // 24: Lighting only (Phong on white)
         case 24:
         {
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -354,7 +357,6 @@ void main() {
             visualColor = vec4(ApplyBlinnPhong(vec3(1.0), n, lightDir, viewDir), 1.0);
             break;
         }
-        // 25: PTC x Lighting
         case 25:
         {
             vec3 baseColor = GetPTCBaseColor();
@@ -364,14 +366,12 @@ void main() {
             visualColor = vec4(ApplyBlinnPhong(baseColor, n, lightDir, viewDir), 1.0);
             break;
         }
-        // 26: Depth
         case 26:
         {
             float t = clamp((dist - depthMin) / max(depthMax - depthMin, 0.001), 0.0, 1.0);
             visualColor = vec4(vec3(t), 1.0);
             break;
         }
-        // 27: EDL
         case 27:
         {
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
@@ -379,11 +379,9 @@ void main() {
             visualColor = vec4(ApplyPointEDL(vec3(1.0), n, viewDir, dist), 1.0);
             break;
         }
-        // 28: AO (crevice darkening - approximated in vertex shader)
         case 28:
         {
             vec3 n = SafeNormalize(inNormal, vec3(0.0, 0.0, 1.0));
-            // Vertex shader can't use fwidth; use normal magnitude as proxy
             float crevice = 1.0 - length(n);
             visualColor = vec4(vec3(1.0 - crevice * 0.5), 1.0);
             break;
@@ -397,23 +395,5 @@ void main() {
     fragDepth = viewPos.w;
     fragWorldPos = inPosition;
     fragNormal = inNormal;
-    // pointScale (viewport height * 0.5) / dist has no upper bound: for a
-    // compact, dense scan viewed at a typical framing distance this computes
-    // to a circle tens of pixels wide, so neighbouring points (often
-    // millimetres apart in a dense LiDAR scan) overlap and merge into solid
-    // blobs instead of showing as distinct dots. Cap it so points stay small
-    // and crisp regardless of how close the camera gets.
-    //
-    // Shaded modes (Normal/Surface Shading + the PTC shading family 17-20)
-    // are the exception: there, points NEED to touch/overlap a little so
-    // each one's own lit normal reads as a small flat facet rather than an
-    // isolated dot - that faceted look is the whole point of per-point
-    // normal shading on a dense cloud.
-    bool isShadedMode = (visualizationMode == 5u || visualizationMode == 13u ||
-                         (visualizationMode >= 17u && visualizationMode <= 20u) ||
-                         (visualizationMode >= 21u && visualizationMode <= 28u));
-    float maxPointPx = isShadedMode ? 6.0 : 3.0;
-    // Adaptive point size: the pointScale * pointSize / dist term already
-    // makes near points larger and far points smaller; the clamp bounds it.
-    gl_PointSize = clamp(pointScale * pointSize / max(1.0, dist), 1.0, maxPointPx);
+    gl_PointSize = ComputePointSize(dist);
 }

@@ -33,6 +33,13 @@ struct SurfaceGenerationParams {
     double normalNeighborRadius = 1.0;
     int normalNeighborCount = 10;
 
+    // PHASE 2: Smooth normals mode
+    // false = Flat per-face normals (faceted crystalline look, current default)
+    // true  = Smooth area-weighted vertex normals (professional LiDAR look)
+    // When true, uses NormalEstimator for area-weighted accumulation.
+    // When false, uses FlattenFaceNormals for per-face normals.
+    bool smoothNormals = true;
+
     // Adaptive triangulation controls (see AdaptiveTriangulator).
     bool adaptiveTriangulation = true;
     double maxEdgeLength = 0.0;   // 0 = automatic (derived from point spacing)

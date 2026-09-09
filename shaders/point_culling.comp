@@ -19,8 +19,9 @@ layout(push_constant) uniform CullPushConstants {
     float pointSize;
     uint maxOutputPoints;      // Screen-space LOD: max points to output this frame
     float viewportHeight;      // For screen-space error calculation
-    float tanHalfFov;          // For screen-space error calculation
+    float viewportWidth;       // For screen-space density control
     uint padding0;
+    uint padding1;
 };
 
 layout(binding = 0, set = 0) buffer readonly InputPoints {
@@ -38,8 +39,16 @@ layout(binding = 2, set = 0) buffer DrawIndirectArgs {
     uint firstInstance;
 };
 
+// Screen-space density grid (hash-based, fits in shared memory)
+// Using 64x64 grid = 4096 cells, each cell tracks 1 point (deterministic selection)
 shared uint sharedCount;
 shared uint globalOutputCount;
+shared uint densityGrid[4096];  // 64x64 grid, stores point index + 1 (0 = empty)
+
+// Hash function for 2D grid coordinates
+uint GridHash(uint x, uint y) {
+    return (x * 73856093u) ^ (y * 19349663u) & 4095u;
+}
 
 bool TestPointInFrustum(vec4 pos) {
     for (int i = 0; i < 6; i++) {
@@ -72,6 +81,10 @@ void main() {
     if (gl_LocalInvocationIndex == 0) {
         sharedCount = 0;
         globalOutputCount = 0;
+        // Initialize density grid
+        for (uint i = 0; i < 4096; i++) {
+            densityGrid[i] = 0;
+        }
     }
     barrier();
 
@@ -100,10 +113,45 @@ void main() {
     // Stochastic LOD: points with higher SSE are more likely to be culled
     if (randVal > 1.0 / lodThreshold) return;
     
+    // Screen-space density control: project to screen and check pixel occupancy
+    vec4 clipPos = viewProjection * inputPoints[idx].position;
+    float w = clipPos.w;
+    if (w <= 0.0) return; // Behind camera
+    
+    // Compute screen coordinates (0 to viewportWidth/Height)
+    float ndcX = clipPos.x / w;
+    float ndcY = clipPos.y / w;
+    float screenX = (ndcX * 0.5 + 0.5) * viewportWidth;
+    float screenY = (ndcY * 0.5 + 0.5) * viewportHeight;
+    
+    // Quantize to pixel grid (round to nearest pixel)
+    uint pixelX = uint(clamp(screenX, 0.0, viewportWidth - 1.0));
+    uint pixelY = uint(clamp(screenY, 0.0, viewportHeight - 1.0));
+    
+    // Hash to density grid
+    uint gridIdx = GridHash(pixelX, pixelY);
+    
+    // Deterministic selection: keep point with smallest hash (consistent per frame)
+    uint pointHash = idx * 1664525u + 1013904223u;
+    pointHash ^= pointHash >> 13;
+    pointHash *= 1664525u;
+    pointHash ^= pointHash >> 13;
+    
+    // Atomic compare-exchange: keep point with smallest hash
+    uint existing = atomicMin(densityGrid[gridIdx], pointHash + 1); // +1 because 0 = empty
+    if (existing != 0 && existing != pointHash + 1) {
+        // Another point with smaller hash already occupies this pixel
+        return;
+    }
+    
     // Global point budget enforcement
     if (maxOutputPoints > 0) {
         uint globalIdx = atomicAdd(globalOutputCount, 1);
-        if (globalIdx >= maxOutputPoints) return;
+        if (globalIdx >= maxOutputPoints) {
+            // If we fail budget, release our grid slot
+            atomicMin(densityGrid[gridIdx], 0);
+            return;
+        }
     }
 
     uint localIdx = atomicAdd(sharedCount, 1);

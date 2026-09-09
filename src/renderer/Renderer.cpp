@@ -3,10 +3,12 @@
 #include "workstation/renderer/VisibilitySystem.h"
 #include "workstation/renderer/VisibilityCache.h"
 #include "workstation/surface/SurfaceLog.h"
+#include "workstation/pointcloud/VoxelNode.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -46,9 +48,10 @@ struct PointPushConstants {
     float surfaceShininess;     //  4 bytes
     float edlStrength;          //  4 bytes
     uint32_t hasCustomPalette;  //  4 bytes (1 = use SSBO classification colors)
-};                              // Total: 156 bytes
-static_assert(sizeof(PointPushConstants) == 156,
-    "PointPushConstants must be exactly 156 bytes to match GLSL shaders");
+    uint32_t lodLevel;          //  4 bytes (LOD level for adaptive point size)
+};                              // Total: 160 bytes
+static_assert(sizeof(PointPushConstants) == 160,
+    "PointPushConstants must be exactly 160 bytes to match GLSL shaders");
 } // namespace
 
 Renderer::~Renderer() { Shutdown(); }
@@ -212,6 +215,10 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreateComputePipeline failed (non-fatal)\n");
         // Non-fatal: compute culling is optional, CPU path continues to work
     }
+
+    // PHASE 14: Detect GPU and auto-select defaults
+    DetectGPU();
+    AutoSelectDefaults();
 
     cadRenderer_.Initialize(&vulkan::VulkanAllocator::Get());
     cadRenderer_.SetCoordinateNormalizer(&coordNormalizer_);
@@ -547,6 +554,9 @@ void Renderer::RenderFrame() {
                                timestampQueryPool_, tsBase + 2);
         }
 
+        // Time command recording (both debug and normal paths)
+        auto tDraw0 = std::chrono::high_resolution_clock::now();
+
         if (cfg.forceDrawAll || useDebug) {
             // Debug mode: bypass visibility/LOD, draw all prepared geometry directly
             VkPipeline activePipeline = useDebug ? debugPipeline_ : pointPipeline_;
@@ -555,7 +565,7 @@ void Renderer::RenderFrame() {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                     pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
             }
-            UpdatePushConstants(cmd);
+            UpdatePushConstants(cmd, 0u);
 
             for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
                 if (!geo || geo->GetPointCount() == 0) continue;
@@ -573,12 +583,12 @@ void Renderer::RenderFrame() {
             auto tVis0 = std::chrono::high_resolution_clock::now();
             PerformVisibilityCulling();
             auto tVis1 = std::chrono::high_resolution_clock::now();
-            framePerf.cpuVisibilityMs = std::chrono::duration<double, std::milli>(tVis1 - tVis0).count();
+            framePerf_.cpuVisibilityMs = std::chrono::duration<double, std::milli>(tVis1 - tVis0).count();
 
             auto tLOD0 = std::chrono::high_resolution_clock::now();
             PerformLODSelection();
             auto tLOD1 = std::chrono::high_resolution_clock::now();
-            framePerf.cpuLODMs = std::chrono::duration<double, std::milli>(tLOD1 - tLOD0).count();
+            framePerf_.cpuLODMs = std::chrono::duration<double, std::milli>(tLOD1 - tLOD0).count();
 
             // Update streaming manager - load/unload nodes based on
             // visibility, then refresh the streaming debug stats mirror.
@@ -586,7 +596,7 @@ void Renderer::RenderFrame() {
                 auto tStr0 = std::chrono::high_resolution_clock::now();
                 streamingManager_->Update(frameNumber_);
                 auto tStr1 = std::chrono::high_resolution_clock::now();
-                framePerf.cpuStreamingMs = std::chrono::duration<double, std::milli>(tStr1 - tStr0).count();
+                framePerf_.cpuStreamingMs = std::chrono::duration<double, std::milli>(tStr1 - tStr0).count();
             }
             UpdateGPUResidency();
 
@@ -600,7 +610,7 @@ void Renderer::RenderFrame() {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
                 }
-                UpdatePushConstants(cmd);
+                // UpdatePushConstants is now called per-node inside DrawResidentNodes/DrawVisibleNodes
 
                 // The draw helper skips any node whose key is not resident,
                 // so passing the resident key set directly gives the same
@@ -613,7 +623,7 @@ void Renderer::RenderFrame() {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
                 }
-                UpdatePushConstants(cmd);
+                // UpdatePushConstants is now called per-node inside DrawVisibleNodes
 
                 // The draw helper skips nodes that are neither resident in
                 // the streaming manager nor adapter-prepared.
@@ -641,7 +651,7 @@ void Renderer::RenderFrame() {
                     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                         pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
                 }
-                UpdatePushConstants(cmd);
+                UpdatePushConstants(cmd, 0u);
 
                 for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
                     if (!geo || geo->GetPointCount() == 0) continue;
@@ -657,6 +667,9 @@ void Renderer::RenderFrame() {
                 }
             }
         }
+
+        auto tDraw1 = std::chrono::high_resolution_clock::now();
+        framePerf_.cpuCmdRecordMs = std::chrono::duration<double, std::milli>(tDraw1 - tDraw0).count();
 
         // GPU timestamp: point rendering end
         if (timestampsSupported_ && timestampQueryPool_ && !useDebug) {
@@ -683,6 +696,7 @@ void Renderer::RenderFrame() {
             imguiOverlay_->RenderVisualizationManagerPanel(visualizationManager_, context_);
             imguiOverlay_->RenderVisibilityPanel(visDebugStats_, context_.GetConfig());
             imguiOverlay_->RenderSurfacePanel(surfaceRenderer_, context_);
+            imguiOverlay_->RenderPerformancePanel(context_);
             imguiOverlay_->RenderToolsPanel(toolManager_, context_);
             imguiOverlay_->RenderDebugOverlay(debugRenderer_, context_);
 
@@ -706,6 +720,8 @@ void Renderer::RenderFrame() {
 
 void Renderer::EndFrame() {
     if (!frameStarted_) return;
+
+    auto tSubmit0 = std::chrono::high_resolution_clock::now();
 
     auto& frame = frameManager_->GetCurrentFrame();
     VkCommandBuffer cmd = commandBuffers_[frame.imageIndex];
@@ -755,6 +771,9 @@ void Renderer::EndFrame() {
     frameManager_->EndFrame();
     frameStarted_ = false;
 
+    auto tSubmit1 = std::chrono::high_resolution_clock::now();
+    framePerf_.cpuSubmitMs = std::chrono::duration<double, std::milli>(tSubmit1 - tSubmit0).count();
+
     benchmark_.EndFrame(context_.GetStats().visiblePoints);
     if (!benchmark_.IsRunning() && benchmark_.GetResult().totalFrames > 0) {
         benchmark_.PrintSummary();
@@ -774,79 +793,144 @@ void Renderer::EndFrame() {
             std::chrono::high_resolution_clock::now() - cpuStageStart_).count();
         framePerf_.gpuComputeMs = context_.GetStats().gpuComputeTimeMs;
         framePerf_.gpuRenderMs = context_.GetStats().gpuRenderTimeMs;
-        framePerf_.gpuTotalMs = framePerf_.gpuComputeMs + framePerf_.gpuRenderMs;
+        framePerf_.gpuSurfaceMs = context_.GetStats().gpuSurfaceTimeMs;
+        framePerf_.gpuTotalMs = framePerf_.gpuComputeMs + framePerf_.gpuRenderMs + framePerf_.gpuSurfaceMs;
         framePerf_.totalPoints = activeCloud_ ? activeCloud_->PointCount() : 0;
         framePerf_.visiblePoints = context_.GetStats().visiblePoints;
         framePerf_.visibleNodes = context_.GetStats().visibleNodes;
         framePerf_.culledNodes = context_.GetStats().culledNodes;
         framePerf_.totalNodes = context_.GetStats().visibleNodes + context_.GetStats().culledNodes;
         framePerf_.drawCalls = context_.GetStats().drawCalls;
+        framePerf_.cpuDrawCalls = context_.GetStats().cpuDrawCalls;
         framePerf_.indirectDraws = context_.GetStats().indirectDrawCount;
         framePerf_.gpuCullingDispatches = context_.GetStats().gpuCullingDispatches;
-        framePerf_.loadedTiles = streamingManager_ ? streamingManager_->GetResidentNodes() : 0;
+        framePerf_.computeCommandsGenerated = context_.GetStats().computeCommandsGenerated;
+        framePerf_.indirectCommandsConsumed = context_.GetStats().indirectDraws;
+        framePerf_.shadingMode = static_cast<uint32_t>(context_.GetConfig().visualizationMode);
+        framePerf_.loadedTiles = streamingManager_ ? streamingManager_->GetDebugStats().gpuResidentNodes : 0;
+        framePerf_.uploadsPerFrame = context_.GetStats().uploadsThisFrame;
+        framePerf_.mbUploaded = context_.GetStats().mbUploadedThisFrame;
+        framePerf_.tileReuseHits = context_.GetStats().tileReuseHits;
+        framePerf_.cacheHitRate = context_.GetStats().cacheHitRate;
+
+        // LOD level distribution from LOD debug stats
+        const auto& lodDebug = context_.GetLODDebugStats();
+        // Count nodes per LOD level from the selected nodes
+        for (uint64_t key : selectedNodeKeys_) {
+            uint32_t lod = context_.GetLODManager().GetNodeLODLevel(key);
+            if (lod < 5) framePerf_.lodLevelDistribution[lod]++;
+        }
+
+        // Rendered/discarded points
+        framePerf_.renderedPoints = context_.GetLODDebugStats().renderedPoints;
+        framePerf_.discardedPoints = framePerf_.totalPoints - framePerf_.visiblePoints;
+
+        // VRAM usage from VMA
+        VmaBudget budgets[1] = {};
+        vmaGetHeapBudgets(vulkan::VulkanAllocator::Get().GetAllocator(), budgets);
+        framePerf_.vramUsed = budgets[0].usage;          // Currently allocated
+        framePerf_.vramAvailable = budgets[0].budget;     // Total budget
+        framePerf_.ramUsed = 0; // TODO: track RSS if needed
 
         static uint32_t perfPrintCounter = 0;
         if (++perfPrintCounter >= 60) { // Print every 60 frames (~1s at 60 FPS)
             perfPrintCounter = 0;
+
+            // Get dataset name
+            const char* datasetName = "none";
+            if (activeCloud_ && activeCloud_->Name()) {
+                datasetName = activeCloud_->Name();
+            }
+
             fprintf(stderr,
-                "\n[FRAME PERFORMANCE]\n"
-                "  CPU:\n"
-                "    Input:        %.3f ms\n"
-                "    Visibility:   %.3f ms\n"
-                "    LOD:          %.3f ms\n"
-                "    Streaming:    %.3f ms\n"
-                "    Surface:      %.3f ms\n"
-                "    Cmd Record:   %.3f ms\n"
-                "    Submit:       %.3f ms\n"
-                "    TOTAL CPU:    %.3f ms\n"
-                "  GPU:\n"
-                "    Compute:      %.3f ms\n"
-                "    Render:       %.3f ms\n"
-                "    TOTAL GPU:    %.3f ms\n"
-                "  POINTS:\n"
-                "    Total:        %llu\n"
-                "    Visible:      %llu\n"
-                "    Rendered:     %llu\n"
-                "    Discarded:    %llu\n"
-                "  NODES:\n"
-                "    Total:        %u\n"
-                "    Visible:      %u\n"
-                "    Culled:       %u\n"
-                "  DRAWS:\n"
-                "    Draw calls:   %u\n"
-                "    Indirect:     %u\n"
-                "    GPU Cull dispatches: %u\n"
-                "  MEMORY:\n"
-                "    RAM:          %llu MB\n"
-                "    VRAM:         %llu / %llu MB\n"
-                "    Resident pts: %llu\n"
-                "    Loaded tiles: %u\n"
-                "  FPS: %.1f (%.2f ms)\n",
-                framePerf_.cpuInputMs,
+                "\n================================================================\n"
+                "[PERFORMANCE REPORT]\n"
+                "================================================================\n"
+                "DATASET: %s\n"
+                "Points: %llu\n"
+                "\n"
+                "CPU:\n"
+                "  Camera:           %.3f ms\n"
+                "  Visibility:       %.3f ms\n"
+                "  LOD:              %.3f ms\n"
+                "  Streaming:        %.3f ms\n"
+                "  Command Recording:%.3f ms\n"
+                "  Submission:       %.3f ms\n"
+                "  Total CPU:        %.3f ms\n"
+                "\n"
+                "GPU:\n"
+                "  Compute Culling:  %.3f ms\n"
+                "  Point Rendering:  %.3f ms\n"
+                "  Surface Rendering:%.3f ms\n"
+                "  Total GPU:        %.3f ms\n"
+                "\n"
+                "POINTS:\n"
+                "  Total points:     %llu\n"
+                "  Visible points:   %llu\n"
+                "  Rendered points:  %llu\n"
+                "  Discarded points: %llu\n"
+                "\n"
+                "LOD:\n"
+                "  LOD0 (high):      %u\n"
+                "  LOD1:             %u\n"
+                "  LOD2:             %u\n"
+                "  LOD3:             %u\n"
+                "  LOD4 (low):       %u\n"
+                "\n"
+                "DRAW:\n"
+                "  Indirect commands:%u\n"
+                "  Draw calls:       %u (CPU) / %u (GPU indirect)\n"
+                "  GPU Cull dispatches: %u\n"
+                "\n"
+                "MEMORY:\n"
+                "  RAM:              %llu MB\n"
+                "  VRAM:             %llu / %llu MB\n"
+                "  Resident tiles:   %u\n"
+                "  Cache hit rate:   %.1f%%\n"
+                "\n"
+                "STREAMING:\n"
+                "  Uploads/frame:    %u\n"
+                "  MB uploaded:      %.2f\n"
+                "  Tile reuse hits:  %u\n"
+                "\n"
+                "SHADING: mode=%u\n"
+                "\n"
+                "FPS: %.1f (%.2f ms)\n"
+                "================================================================\n",
+                datasetName,
+                framePerf_.totalPoints,
+                framePerf_.cpuCameraMs,
                 framePerf_.cpuVisibilityMs,
                 framePerf_.cpuLODMs,
                 framePerf_.cpuStreamingMs,
-                framePerf_.cpuSurfaceMs,
                 framePerf_.cpuCmdRecordMs,
                 framePerf_.cpuSubmitMs,
                 framePerf_.cpuTotalMs,
                 framePerf_.gpuComputeMs,
                 framePerf_.gpuRenderMs,
+                framePerf_.gpuSurfaceMs,
                 framePerf_.gpuTotalMs,
                 framePerf_.totalPoints,
                 framePerf_.visiblePoints,
                 framePerf_.renderedPoints,
                 framePerf_.discardedPoints,
-                framePerf_.totalNodes,
-                framePerf_.visibleNodes,
-                framePerf_.culledNodes,
-                framePerf_.drawCalls,
+                framePerf_.lodLevelDistribution[0],
+                framePerf_.lodLevelDistribution[1],
+                framePerf_.lodLevelDistribution[2],
+                framePerf_.lodLevelDistribution[3],
+                framePerf_.lodLevelDistribution[4],
                 framePerf_.indirectDraws,
+                framePerf_.cpuDrawCalls,
+                framePerf_.drawCalls,
                 framePerf_.gpuCullingDispatches,
                 framePerf_.ramUsed / (1024*1024),
-                framePerf_.vramUsed / (1024*1024), framePerf_.vramAvailable / (1024*1024),
-                framePerf_.residentPoints,
+                framePerf_.vramAvailable / (1024*1024), framePerf_.vramUsed / (1024*1024),
                 framePerf_.loadedTiles,
+                framePerf_.cacheHitRate * 100.0,
+                framePerf_.uploadsPerFrame,
+                framePerf_.mbUploaded,
+                framePerf_.tileReuseHits,
+                framePerf_.shadingMode,
                 context_.GetStats().fps, context_.GetStats().frameTimeMs);
             fflush(stderr);
         }
@@ -1054,7 +1138,7 @@ void Renderer::DrawVectorOverlay(VkCommandBuffer cmd) {
     if (overlayVertexCount_ == 0 || !overlayVertexBuffer_.IsValid()) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline_);
-    UpdatePushConstants(cmd);
+    UpdatePushConstants(cmd, 0u);
 
     VkBuffer bufs[] = {overlayVertexBuffer_.buffer};
     VkDeviceSize offs[] = {0};
@@ -1066,7 +1150,7 @@ void Renderer::DrawCadGeometry(VkCommandBuffer cmd) {
     if (!cadRenderer_.HasGeometry()) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cadLinePipeline_);
-    UpdatePushConstants(cmd);
+    UpdatePushConstants(cmd, 0u);
 
     if (cadRenderer_.GetLineVertexCount() > 0) {
         VkBuffer bufs[] = {cadRenderer_.GetLineVertexBuffer().buffer};
@@ -1110,6 +1194,7 @@ void Renderer::DrawSurface(VkCommandBuffer cmd) {
     params.lightDirZ = lightDir[2];
     params.elevationMin = cfg.elevationMin;
     params.elevationMax = cfg.elevationMax;
+    params.verticalExaggeration = cfg.verticalExaggeration;
 
     // Both pipelines must read the SAME classification palette SSBO: hand the
     // point pipeline's descriptor set to the surface renderer so every PTC
@@ -1264,9 +1349,50 @@ void Renderer::BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud) {
     auto* root = cloud.Root();
     if (!root) return;
 
-    spatialTree_.Insert(0, root->PointCount(), root->bounds());
+    // Walk the octree assigning keys to ALL nodes (matching PreparePointCloud
+    // key scheme exactly), but only INSERT leaf nodes into the spatial tree.
+    // Internal VoxelNodes have 0 point data and waste LOD budget.
+    // Keys MUST match PreparePointCloud — both assign sequentially to every node.
+    uint32_t nodeCount = 0;
+    uint32_t leafCount = 0;
+    uint64_t totalPoints = 0;
+    uint64_t nextKey = 0;
 
-    visDebugStats_.totalNodes = 1;
+    std::function<void(pointcloud::PointCloudNode*)> walk =
+        [&](pointcloud::PointCloudNode* n) {
+        if (!n) return;
+
+        uint64_t key = nextKey++;
+        nodeCount++;
+
+        if (!n->IsVoxel()) {
+            // Leaf: insert into spatial tree with actual point data
+            spatialTree_.Insert(key, n->PointCount(), n->bounds());
+            totalPoints += n->PointCount();
+            leafCount++;
+        }
+        // VoxelNode: key consumed (matching PreparePointCloud) but not inserted
+
+        if (auto* v = dynamic_cast<pointcloud::VoxelNode*>(n)) {
+            for (size_t i = 0; i < v->ChildCount(); ++i) {
+                walk(v->Child(i));
+            }
+        }
+    };
+
+    walk(root);
+
+    visDebugStats_.totalNodes = nodeCount;
+
+    fprintf(stderr,
+        "\n[OCTREE DEBUG]\n"
+        "  Stage:        BuildSpatialTreeFromCloud\n"
+        "  Total nodes:  %u\n"
+        "  Leaf nodes:   %u (in spatial tree)\n"
+        "  Total points: %llu\n"
+        "  Root points:  %llu\n",
+        nodeCount, leafCount, totalPoints, root->PointCount());
+    fflush(stderr);
 }
 
 void Renderer::PerformVisibilityCulling() {
@@ -1376,12 +1502,12 @@ bool Renderer::CreateComputePipeline() {
     // Push constants: must match CullPushConstants in point_culling.comp
     // mat4 viewProjection (64) + vec4 frustumPlanes[6] (96) +
     // uint totalPoints (4) + uint outputOffset (4) + float pointSize (4) +
-    // uint maxOutputPoints (4) + float viewportHeight (4) + float tanHalfFov (4) +
-    // uint padding0 (4) = 192
+    // uint maxOutputPoints (4) + float viewportHeight (4) + float viewportWidth (4) +
+    // float tanHalfFov (4) + uint padding0 (4) + uint padding1 (4) = 196
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     pushRange.offset = 0;
-    pushRange.size = 192;
+    pushRange.size = 196;
 
     cullingComputePipelineLayout_ = pipelineManager_->CreatePipelineLayout(
         {cullingComputeDescriptorLayout_}, {pushRange});
@@ -1422,6 +1548,64 @@ bool Renderer::CreateComputePipeline() {
     return cullingComputePipeline_ != VK_NULL_HANDLE;
 }
 
+void Renderer::DetectGPU() {
+    VkPhysicalDeviceProperties physProps{};
+    vkGetPhysicalDeviceProperties(device_->GetPhysicalDeviceInfo().GetDevice(), &physProps);
+
+    strncpy(gpuInfo_.name, physProps.deviceName, sizeof(gpuInfo_.name) - 1);
+    gpuInfo_.maxWorkGroupSize = physProps.limits.maxComputeWorkGroupSize[0];
+    gpuInfo_.maxClockGHz = physProps.limits.timestampPeriod > 0
+        ? 1.0f / (physProps.limits.timestampPeriod * 1e-9f) / 1e9f : 0.0f;
+
+    // Query memory heap sizes
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(device_->GetPhysicalDeviceInfo().GetDevice(), &memProps);
+    uint64_t totalVram = 0;
+    for (uint32_t i = 0; i < memProps.memoryHeapCount; i++) {
+        if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            totalVram += memProps.memoryHeaps[i].size;
+        }
+    }
+    gpuInfo_.vramTotal = totalVram;
+
+    fprintf(stderr,
+        "\n================================================================\n"
+        "[GPU DETECTION]\n"
+        "================================================================\n"
+        "  Name:            %s\n"
+        "  VRAM:            %llu MB\n"
+        "  Compute Units:   %u\n"
+        "  Max WorkGroup:   %u\n"
+        "================================================================\n",
+        gpuInfo_.name,
+        gpuInfo_.vramTotal / (1024ULL * 1024ULL),
+        gpuInfo_.computeUnits,
+        gpuInfo_.maxWorkGroupSize);
+    fflush(stderr);
+}
+
+void Renderer::AutoSelectDefaults() {
+    uint64_t vramMB = gpuInfo_.vramTotal / (1024ULL * 1024ULL);
+
+    if (vramMB <= 4096) {
+        // 4GB GPU: conservative
+        gpuInfo_.defaultPointBudget = 2'000'000;
+        gpuInfo_.defaultGpuBudget = 2'000'000;
+        fprintf(stderr, "[AUTO CONFIG] 4GB GPU detected: point budget = 2M\n");
+    } else if (vramMB <= 8192) {
+        // 8GB GPU: medium
+        gpuInfo_.defaultPointBudget = 5'000'000;
+        gpuInfo_.defaultGpuBudget = 5'000'000;
+        fprintf(stderr, "[AUTO CONFIG] 8GB GPU detected: point budget = 5M\n");
+    } else {
+        // 16GB+: high
+        gpuInfo_.defaultPointBudget = 10'000'000;
+        gpuInfo_.defaultGpuBudget = 10'000'000;
+        fprintf(stderr, "[AUTO CONFIG] %lluGB GPU detected: point budget = 10M\n", vramMB / 1024);
+    }
+    fflush(stderr);
+}
+
 // Interleaved PointVertex matching point_culling.comp's std430 layout:
 // vec4 position (16) + vec4 color (16) + float intensity (4) + float classification (4)
 // + padding (8) + vec3 normal (12) + trailing (4) = 64 bytes
@@ -1455,6 +1639,37 @@ void Renderer::BuildCullingBuffers() {
     VkDeviceSize inputSize = static_cast<VkDeviceSize>(totalPoints) * sizeof(CullPointVertex);
     VkDeviceSize outputSize = inputSize;
     VkDeviceSize indirectSize = sizeof(VkDrawIndirectCommand);
+
+    // PHASE 7: Only reallocate if size changed (avoid per-frame allocation)
+    if (cullingInputBuffer_.buffer != VK_NULL_HANDLE &&
+        cullingInputBuffer_.size >= inputSize) {
+        // Buffer is large enough, just update the point count
+        cullingTotalPoints_ = totalPoints;
+
+        // Update descriptor set bindings
+        descriptorManager_->UpdateBuffer(
+            cullingComputeDescriptorSet_, 0,
+            cullingInputBuffer_.buffer, cullingInputBuffer_.size,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        descriptorManager_->UpdateBuffer(
+            cullingComputeDescriptorSet_, 1,
+            cullingOutputBuffer_.buffer, cullingOutputBuffer_.size,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        descriptorManager_->UpdateBuffer(
+            cullingComputeDescriptorSet_, 2,
+            cullingIndirectBuffer_.buffer, cullingIndirectBuffer_.size,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+
+        fprintf(stderr, "[GPU Culling] Reusing buffers: %u points (existing capacity=%llu)\n",
+                totalPoints, cullingInputBuffer_.size);
+        fflush(stderr);
+        return;
+    }
+
+    // Need to allocate new buffers
+    fprintf(stderr, "[GPU Culling] Allocating new buffers: %u points, input=%.1f MB\n",
+            totalPoints, inputSize / (1024.0 * 1024.0));
+    fflush(stderr);
 
     // Allocate input SSBO (host-visible for upload)
     cullingInputBuffer_ = {};
@@ -1580,10 +1795,6 @@ void Renderer::BuildCullingBuffers() {
         cullingComputeDescriptorSet_, 2,
         cullingIndirectBuffer_.buffer, cullingIndirectBuffer_.size,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-
-    fprintf(stderr, "[GPU Culling] Built culling buffers: %u points, input=%.1f MB\n",
-            totalPoints, inputSize / (1024.0 * 1024.0));
-    fflush(stderr);
 }
 
 void Renderer::DispatchCullingComputeShader() {
@@ -1632,8 +1843,10 @@ void Renderer::DispatchCullingComputeShader() {
         float pointSize;
         uint32_t maxOutputPoints;
         float viewportHeight;
+        float viewportWidth;
         float tanHalfFov;
         uint32_t padding0;
+        uint32_t padding1;
     } pc;
 
     // Copy VP matrix (double -> float)
@@ -1662,8 +1875,10 @@ void Renderer::DispatchCullingComputeShader() {
     pc.pointSize = 2.0f;
     pc.maxOutputPoints = context_.GetConfig().maxPointsPerFrame;
     pc.viewportHeight = static_cast<float>(context_.GetViewportHeight());
+    pc.viewportWidth = static_cast<float>(context_.GetViewportWidth());
     pc.tanHalfFov = std::tan(cam.GetFOV() * 0.5 * M_PI / 180.0);
     pc.padding0 = 0;
+    pc.padding1 = 0;
 
     vkCmdPushConstants(cmd, cullingComputePipelineLayout_,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
@@ -1730,12 +1945,15 @@ void Renderer::DrawVisibleNodes(VkCommandBuffer cmd) {
         auto* geo = adapter_.GetPreparedGeometry(key);
         if (!geo || geo->GetPointCount() == 0) continue;
 
+        uint32_t lodLevel = context_.GetLODManager().GetNodeLODLevel(key);
+
         geo->BindPosition(cmd, 0);
         geo->BindColor(cmd, 1);
         geo->BindIntensity(cmd, 2);
         geo->BindClassification(cmd, 3);
         geo->BindNormal(cmd, 4);
 
+        UpdatePushConstants(cmd, lodLevel);
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
@@ -1756,6 +1974,9 @@ void Renderer::PerformLODSelection() {
     lodManager.GetConfig().forceLODLevel = cfg.forceLODLevel;
     lodManager.GetConfig().visiblePointBudget =
         static_cast<uint64_t>(cfg.pointBudgetMillions * 1'000'000.0);
+    // LOD Hysteresis thresholds (PHASE 4)
+    lodManager.GetConfig().lodEnterThreshold = cfg.lodEnterThreshold;
+    lodManager.GetConfig().lodExitThreshold = cfg.lodExitThreshold;
 
     pointBudget.SetConfig({cfg.maxPointsPerFrame, 100'000'000, 1000, true});
     pointBudget.BeginFrame();
@@ -1767,6 +1988,7 @@ void Renderer::PerformLODSelection() {
         context_.GetViewportHeight(),
         pointBudget,
         activeCloud_,
+        &spatialTree_,
         visCache,
         frameNumber_);
 
@@ -1826,19 +2048,24 @@ void Renderer::StartBenchmark(uint32_t frames) {
 }
 
 void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
+    uint32_t drawnNodes = 0;
+    uint64_t drawnPoints = 0;
     for (uint64_t key : selectedNodeKeys_) {
         auto* geo = adapter_.GetPreparedGeometry(key);
         if (!geo || geo->GetPointCount() == 0) continue;
 
         // Geometry prepared by the adapter (via PreparePointCloud) is already
-        // uploaded to GPU buffers and is always drawable. The streaming
-        // manager's residency check applies only to nodes that depend on the
-        // streaming pipeline for upload — adapter-prepared nodes do not.
+        // uploaded to GPU buffers and is always drawable.
         if (streamingManager_ &&
             !streamingManager_->IsNodeResident(key) &&
             adapter_.GetPreparedGeometry(key) == nullptr) {
             continue;
         }
+
+        drawnNodes++;
+        drawnPoints += geo->GetPointCount();
+
+        uint32_t lodLevel = context_.GetLODManager().GetNodeLODLevel(key);
 
         geo->BindPosition(cmd, 0);
         geo->BindColor(cmd, 1);
@@ -1846,9 +2073,32 @@ void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
         geo->BindClassification(cmd, 3);
         geo->BindNormal(cmd, 4);
 
+        UpdatePushConstants(cmd, lodLevel);
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
+    }
+
+    // Pipeline node count verification (once per frame)
+    {
+        static uint32_t lastFrame = 0;
+        if (frameNumber_ != lastFrame) {
+            lastFrame = frameNumber_;
+            fprintf(stderr,
+                "[OCTREE PIPELINE]\n"
+                "  Visible nodes:  %zu\n"
+                "  Selected nodes: %zu\n"
+                "  Drawn nodes:    %u\n"
+                "  Drawn points:   %llu\n"
+                "  Spatial tree:   %zu nodes\n"
+                "  Adapter geoms:  %zu\n",
+                visibleNodeKeys_.size(),
+                selectedNodeKeys_.size(),
+                drawnNodes, drawnPoints,
+                spatialTree_.Size(),
+                adapter_.GetAllPreparedGeometries().size());
+            fflush(stderr);
+        }
     }
 }
 
@@ -2203,7 +2453,7 @@ bool Renderer::CreateDescriptorResources() {
     return true;
 }
 
-void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
+void Renderer::UpdatePushConstants(VkCommandBuffer cmd, uint32_t lodLevel) {
     auto& cam = context_.GetCamera();
     auto& cfg = context_.GetConfig();
 
@@ -2248,20 +2498,22 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd) {
     pc.surfaceShininess = cfg.surfaceShininess;
     pc.edlStrength = cfg.edlStrength;
     pc.hasCustomPalette = hasCustomPalette_ ? 1u : 0u;
+    pc.lodLevel = lodLevel;
 
     static int logCounter = 0;
     if (logCounter++ < 5 || (logCounter % 120 == 0)) {
         // clsSet is the SAME descriptor set bound for every visualization mode
         // (flat PTC included) -- identical handle proves identical SSBO source.
-        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u clsSet=%p light=(%.2f,%.2f,%.2f)\n",
+        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u clsSet=%p light=(%.2f,%.2f,%.2f) lod=%u\n",
                 pc.visualizationMode, pc.hasCustomPalette,
                 (void*)classificationDescriptorSet_,
-                pc.lightDirection[0], pc.lightDirection[1], pc.lightDirection[2]);
+                pc.lightDirection[0], pc.lightDirection[1], pc.lightDirection[2],
+                pc.lodLevel);
     }
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
-                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                        0, sizeof(pc), &pc);
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(pc), &pc);
 }
 
 } // namespace renderer

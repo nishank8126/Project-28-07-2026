@@ -90,6 +90,7 @@ LODSelectionResult LODManager::SelectNodes(
     uint32_t viewportHeight,
     ViewportPointBudget& budget,
     const pointcloud::PointCloud* cloud,
+    const spatial::SpatialTree* spatialTree,
     VisibilityCache& visCache,
     uint32_t frameNumber) {
 
@@ -119,14 +120,25 @@ LODSelectionResult LODManager::SelectNodes(
     candidates.reserve(visibleNodes.size());
 
     for (uint64_t key : visibleNodes) {
-        auto* root = cloud->Root();
-        if (!root) continue;
-
         LODNodeCandidate candidate{};
         candidate.nodeKey = key;
-        candidate.pointCount = root->PointCount();
-        candidate.bounds = root->bounds();
         candidate.isVisible = true;
+
+        // Look up actual node data from the spatial tree instead of using root.
+        const auto* spatialNode = spatialTree ? spatialTree->Find(key) : nullptr;
+        if (spatialNode) {
+            candidate.pointCount = spatialNode->pointCount;
+            candidate.bounds = spatialNode->bounds;
+        } else {
+            auto* root = cloud->Root();
+            if (!root) continue;
+            candidate.pointCount = root->PointCount();
+            candidate.bounds = root->bounds();
+        }
+
+        // Skip internal VoxelNodes (0 points) — only leaves have renderable data.
+        // Including them wastes budget since DrawResidentNodes skips 0-point geometry.
+        if (candidate.pointCount == 0) continue;
 
         const auto* cached = visCache.Get(key);
         candidate.wasVisibleLastFrame = cached ? cached->wasVisibleLastFrame : false;
@@ -141,16 +153,45 @@ LODSelectionResult LODManager::SelectNodes(
             candidate.level = static_cast<uint32_t>(config_.forceLODLevel);
         } else {
             double sse = candidate.screenSpaceError;
-            if (sse >= config_.maxScreenSpaceError) {
-                candidate.level = 0;
-            } else if (sse <= config_.minScreenSpaceError) {
-                candidate.level = config_.maxLODLevels - 1;
+
+            // LOD Hysteresis (PHASE 4):
+            // If node was previously selected, check if we should stay at
+            // the current LOD level to prevent rapid switching (flickering).
+            // Only change LOD when SSE crosses the hysteresis thresholds.
+            const auto* cachedEntry = lodCache_.Get(candidate.nodeKey);
+            uint32_t cachedLOD = cachedEntry ? cachedEntry->currentLOD : 0;
+            bool wasSelected = cachedEntry ? cachedEntry->isSelected : false;
+
+            if (wasSelected && cachedEntry) {
+                // Node was selected last frame - apply hysteresis
+                // Stay at current LOD unless SSE clearly crosses thresholds
+                if (sse < config_.lodEnterThreshold && cachedLOD > 0) {
+                    // SSE clearly low enough: increase detail (decrease LOD number)
+                    candidate.level = cachedLOD - 1;
+                } else if (sse > config_.lodExitThreshold) {
+                    // SSE clearly high enough: decrease detail (increase LOD number)
+                    candidate.level = cachedLOD + 1;
+                } else {
+                    // SSE in hysteresis band: keep current LOD
+                    candidate.level = cachedLOD;
+                }
             } else {
-                double normalized = (sse - config_.minScreenSpaceError) /
-                                    (config_.maxScreenSpaceError - config_.minScreenSpaceError);
-                candidate.level = static_cast<uint32_t>(
-                    (1.0 - normalized) * (config_.maxLODLevels - 1));
+                // New node (not previously selected): assign LOD based on SSE
+                if (sse >= config_.maxScreenSpaceError) {
+                    candidate.level = 0;
+                } else if (sse <= config_.minScreenSpaceError) {
+                    candidate.level = config_.maxLODLevels - 1;
+                } else {
+                    double normalized = (sse - config_.minScreenSpaceError) /
+                                        (config_.maxScreenSpaceError - config_.minScreenSpaceError);
+                    candidate.level = static_cast<uint32_t>(
+                        (1.0 - normalized) * (config_.maxLODLevels - 1));
+                }
             }
+
+            // Clamp LOD level to valid range
+            candidate.level = std::min(candidate.level,
+                                        static_cast<uint32_t>(config_.maxLODLevels - 1));
         }
 
         candidates.push_back(candidate);
@@ -272,6 +313,22 @@ double LODManager::CalculateLODScore(const LODNodeCandidate& node,
 uint32_t LODManager::GetBudgetRemaining() const {
     if (selectedPointCount_ >= config_.visiblePointBudget) return 0;
     return static_cast<uint32_t>(config_.visiblePointBudget - selectedPointCount_);
+}
+
+uint32_t LODManager::GetNodeLODLevel(uint64_t nodeKey) const {
+    for (const auto& node : selectedNodes_) {
+        if (node.nodeKey == nodeKey) {
+            return node.level;
+        }
+    }
+    for (const auto& node : rejectedNodes_) {
+        if (node.nodeKey == nodeKey) {
+            return node.level;
+        }
+    }
+    const auto* entry = lodCache_.Get(nodeKey);
+    if (entry) return entry->currentLOD;
+    return 0;
 }
 
 void LODManager::Clear() {

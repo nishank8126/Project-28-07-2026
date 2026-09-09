@@ -76,6 +76,7 @@ struct SurfaceRenderParams {
     float lightDirZ = 0.87f;
     float elevationMin = 0.0f;
     float elevationMax = 1000.0f;
+    float verticalExaggeration = 1.0f;
 };
 
 struct SurfacePushConstants {

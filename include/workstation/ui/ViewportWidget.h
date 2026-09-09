@@ -150,6 +150,7 @@ private:
     surface::SurfaceMeshCache surfaceCache_;
     surface::ElevationCache elevationCache_;
     surface::SurfaceGenerationParams m_surfaceGenParams;
+    uint32_t m_terrainGridRes = 256;  // ElevationGrid resolution (256/512/1024)
     bool surfaceVisible_ = false;
     // Progressive elevation generation
     std::future<void> pendingElevationGen_;

@@ -1,7 +1,11 @@
 #include "workstation/renderer/PointCloudRenderAdapter.h"
 #include "workstation/pointcloud/PointAttributeChannel.h"
 #include "workstation/pointcloud/PointChannelManager.h"
+#include "workstation/pointcloud/VoxelNode.h"
 #include "workstation/surface/SurfaceLog.h"
+
+#include <cstdio>
+#include <functional>
 
 namespace workstation {
 namespace renderer {
@@ -14,7 +18,49 @@ gpu::PreparedGeometry* PointCloudRenderAdapter::PreparePointCloud(
     pointcloud::PointCloud& cloud) {
     auto* root = cloud.Root();
     if (!root) return nullptr;
-    return PrepareNode(0, root);
+
+    // Recursively prepare ONLY LEAF nodes — matching BuildSpatialTreeFromCloud.
+    // Internal VoxelNodes have 0 point data and waste GPU memory / budget.
+    // Keys must match BuildSpatialTreeFromCloud() sequential leaf-only scheme.
+    uint32_t preparedCount = 0;
+    uint64_t preparedPoints = 0;
+    uint64_t nextKey = 0;
+
+    std::function<void(pointcloud::PointCloudNode*)> walk =
+        [&](pointcloud::PointCloudNode* n) {
+        if (!n) return;
+
+        uint64_t key = nextKey++;
+
+        if (!n->IsVoxel()) {
+            // Leaf node: prepare for GPU rendering
+            auto* geo = PrepareNode(key, n);
+            if (geo) {
+                preparedCount++;
+                preparedPoints += n->PointCount();
+            }
+        }
+        // VoxelNode: key is consumed but no geometry prepared (0 points)
+
+        if (auto* v = dynamic_cast<pointcloud::VoxelNode*>(n)) {
+            for (size_t i = 0; i < v->ChildCount(); ++i) {
+                walk(v->Child(i));
+            }
+        }
+    };
+
+    walk(root);
+
+    fprintf(stderr,
+        "\n[OCTREE DEBUG]\n"
+        "  Stage:          PreparePointCloud\n"
+        "  Prepared nodes: %u (leaves only)\n"
+        "  Prepared points:%llu\n"
+        "  Root points:    %llu\n",
+        preparedCount, preparedPoints, root->PointCount());
+    fflush(stderr);
+
+    return GetPreparedGeometry(0); // Return root geometry (may be null for VoxelNode root)
 }
 
 gpu::PreparedGeometry* PointCloudRenderAdapter::PrepareNode(

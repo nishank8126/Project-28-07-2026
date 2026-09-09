@@ -62,6 +62,13 @@ void ElevationGrid::Generate(const pointcloud::PointCloud& cloud,
     double xyz[3];
     const size_t totalPoints = xyzChannel->Count();
 
+    // Collect raw LAS ground point statistics for comparison
+    double lasMinZ = std::numeric_limits<double>::max();
+    double lasMaxZ = std::numeric_limits<double>::lowest();
+    double lasSumZ = 0.0;
+    double lasSumSqZ = 0.0;
+    size_t lasGroundCount = 0;
+
     for (size_t i = 0; i < totalPoints; ++i) {
         if (!channels.ReadXYZ(i, xyz)) continue;
 
@@ -90,6 +97,13 @@ void ElevationGrid::Generate(const pointcloud::PointCloud& cloud,
                     break;
             }
         }
+
+        // Track LAS ground point statistics
+        lasSumZ += xyz[2];
+        lasSumSqZ += xyz[2] * xyz[2];
+        lasGroundCount++;
+        if (xyz[2] < lasMinZ) lasMinZ = xyz[2];
+        if (xyz[2] > lasMaxZ) lasMaxZ = xyz[2];
 
         // Bin into grid cell
         int32_t gx = static_cast<int32_t>((xyz[0] - bounds.minX) / cellSize_);
@@ -153,12 +167,98 @@ void ElevationGrid::Generate(const pointcloud::PointCloud& cloud,
     stats_.interpolateTimeMs = ElapsedMs(t1, t2);
     stats_.totalTimeMs = ElapsedMs(t0, t2);
 
-    SLOG_INFO("ElevationGrid: %ux%u grid, %u/%u occupied (%.0f%%), "
-              "elev=[%.1f, %.1f], bin=%.1fms interp=%.1fms",
-              width_, height_, occupied, width_ * height_,
-              100.0 * occupied / (width_ * height_),
-              minElevation_, maxElevation_,
-              stats_.binningTimeMs, stats_.interpolateTimeMs);
+    // [ELEVATION GRID QUALITY] - terrain variance analysis
+    {
+        double sumZ = 0.0, sumSq = 0.0;
+        uint32_t count = 0;
+        float maxSlope = 0.0f;
+        float meanSlope = 0.0f;
+        uint32_t slopeCount = 0;
+        double sumRoughness = 0.0;
+        uint32_t roughnessCount = 0;
+        for (uint32_t y = 0; y < height_; ++y) {
+            for (uint32_t x = 0; x < width_; ++x) {
+                const auto& cell = cells_[y * width_ + x];
+                if (!cell.valid) continue;
+                float z = cell.AverageElevation();
+                sumZ += z;
+                sumSq += z * z;
+                count++;
+                // Slope from normal
+                float nz = cell.normalZ;
+                if (nz > 0.01f) {
+                    float slopeDeg = std::acos(std::min(nz, 1.0f)) * 180.0f / 3.14159f;
+                    meanSlope += slopeDeg;
+                    if (slopeDeg > maxSlope) maxSlope = slopeDeg;
+                    slopeCount++;
+                }
+                // Terrain roughness: mean abs Z difference from 4-connected neighbors
+                float absDiffSum = 0.0;
+                uint32_t neighbors = 0;
+                if (x > 0 && cells_[y * width_ + (x-1)].valid) {
+                    absDiffSum += std::abs(z - cells_[y * width_ + (x-1)].AverageElevation());
+                    neighbors++;
+                }
+                if (x + 1 < width_ && cells_[y * width_ + (x+1)].valid) {
+                    absDiffSum += std::abs(z - cells_[y * width_ + (x+1)].AverageElevation());
+                    neighbors++;
+                }
+                if (y > 0 && cells_[(y-1) * width_ + x].valid) {
+                    absDiffSum += std::abs(z - cells_[(y-1) * width_ + x].AverageElevation());
+                    neighbors++;
+                }
+                if (y + 1 < height_ && cells_[(y+1) * width_ + x].valid) {
+                    absDiffSum += std::abs(z - cells_[(y+1) * width_ + x].AverageElevation());
+                    neighbors++;
+                }
+                if (neighbors > 0) {
+                    sumRoughness += absDiffSum / neighbors;
+                    roughnessCount++;
+                }
+            }
+        }
+        double meanZ = (count > 0) ? sumZ / count : 0.0;
+        double stddevZ = (count > 0) ? std::sqrt(sumSq / count - meanZ * meanZ) : 0.0;
+        meanSlope = (slopeCount > 0) ? meanSlope / slopeCount : 0.0f;
+        float roughness = (roughnessCount > 0) ? static_cast<float>(sumRoughness / roughnessCount) : 0.0f;
+
+        stats_.meanSlopeDeg = meanSlope;
+        stats_.maxSlopeDeg = maxSlope;
+        stats_.zStddev = static_cast<float>(stddevZ);
+        stats_.terrainRoughness = roughness;
+
+        // LAS ground point statistics for comparison
+        double lasMeanZ = (lasGroundCount > 0) ? lasSumZ / lasGroundCount : 0.0;
+        double lasStddevZ = (lasGroundCount > 0) ? std::sqrt(lasSumSqZ / lasGroundCount - lasMeanZ * lasMeanZ) : 0.0;
+
+        fprintf(stderr,
+            "[SURFACE QUALITY]\n"
+            "  LAS ground points: %zu\n"
+            "  LAS Z range: [%.3f, %.3f] = %.3f\n"
+            "  LAS Z mean: %.3f, stddev: %.3f\n"
+            "  Grid: %ux%u, cellSize=%.3f\n"
+            "  Occupied: %u/%u (%.0f%%)\n"
+            "  Grid Z range: [%.3f, %.3f] = %.3f\n"
+            "  Grid Z mean: %.3f, stddev: %.3f\n"
+            "  Z preservation: %.1f%% range, %.1f%% stddev\n"
+            "  Mean slope: %.1f deg, max slope: %.1f deg\n"
+            "  Terrain roughness: %.3f m\n"
+            "  Timing: bin=%.1fms interp=%.1fms total=%.1fms\n",
+            lasGroundCount,
+            lasMinZ, lasMaxZ, lasMaxZ - lasMinZ,
+            lasMeanZ, lasStddevZ,
+            width_, height_, cellSize_,
+            occupied, width_ * height_,
+            100.0 * occupied / (width_ * height_),
+            minElevation_, maxElevation_, maxElevation_ - minElevation_,
+            meanZ, stddevZ,
+            (lasMaxZ - lasMinZ > 0) ? 100.0 * (maxElevation_ - minElevation_) / (lasMaxZ - lasMinZ) : 0.0,
+            (lasStddevZ > 0) ? 100.0 * stddevZ / lasStddevZ : 0.0,
+            meanSlope, maxSlope,
+            roughness,
+            stats_.binningTimeMs, stats_.interpolateTimeMs, stats_.totalTimeMs);
+        fflush(stderr);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,6 +549,61 @@ SurfaceMesh ElevationGrid::CreateMesh() {
               "elev=[%.1f, %.1f], mesh=%.1fms",
               vertices.size(), triangles.size(),
               minElevation_, maxElevation_, stats_.meshGenTimeMs);
+
+    // [ELEVATION GRID DEBUG] - verify Z preservation and terrain quality
+    if (!vertices.empty()) {
+        float meshMinZ = vertices[0].position[2];
+        float meshMaxZ = vertices[0].position[2];
+        double meshSumZ = 0.0;
+        uint32_t validVerts = 0;
+        double sumNz = 0.0;
+        float minNz = 1.0f;
+        uint32_t normalCount = 0;
+        for (const auto& v : vertices) {
+            float z = v.position[2];
+            if (z != 0.0f) {
+                if (z < meshMinZ) meshMinZ = z;
+                if (z > meshMaxZ) meshMaxZ = z;
+                meshSumZ += z;
+                validVerts++;
+            }
+            float nz = v.normal[2];
+            sumNz += nz;
+            if (nz < minNz) minNz = nz;
+            normalCount++;
+        }
+        float meanNz = (normalCount > 0) ? static_cast<float>(sumNz / normalCount) : 1.0f;
+        // Z variance: how much terrain detail is preserved
+        double meshMeanZ = (validVerts > 0) ? meshSumZ / validVerts : 0.0;
+        double sumSq = 0.0;
+        for (const auto& v : vertices) {
+            double dz = v.position[2] - meshMeanZ;
+            sumSq += dz * dz;
+        }
+        double meshStddevZ = (validVerts > 0) ? std::sqrt(sumSq / validVerts) : 0.0;
+
+        fprintf(stderr,
+            "[SURFACE QUALITY]\n"
+            "  Grid: %ux%u, cellSize=%.3f\n"
+            "  Vertices: %zu (valid: %u)\n"
+            "  Triangles: %zu\n"
+            "  Min Z: %.3f\n"
+            "  Max Z: %.3f\n"
+            "  Z Range: %.3f\n"
+            "  Mean Z: %.3f\n"
+            "  Std deviation: %.3f\n"
+            "  Mean Nz: %.4f (1.0=flat, <1.0=sloped)\n"
+            "  Min Nz: %.4f (max slope)\n"
+            "  Mesh timing: %.1fms\n",
+            width_, height_, cellSize_,
+            vertices.size(), validVerts,
+            triangles.size(),
+            meshMinZ, meshMaxZ, meshMaxZ - meshMinZ,
+            meshMeanZ, meshStddevZ,
+            meanNz, minNz,
+            stats_.meshGenTimeMs);
+        fflush(stderr);
+    }
 
     return mesh;
 }

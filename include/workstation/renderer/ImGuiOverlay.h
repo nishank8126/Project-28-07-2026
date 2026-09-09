@@ -46,6 +46,7 @@ public:
     void RenderDebugOverlay(DebugRenderer& debugRenderer, RenderContext& context);
     void RenderVisualizationManagerPanel(VisualizationManager& vizManager, RenderContext& context);
     void RenderSurfacePanel(surface::SurfaceRenderer& surfaceRenderer, RenderContext& context);
+    void RenderPerformancePanel(RenderContext& context);
 
     bool IsInitialized() const { return initialized_; }
 

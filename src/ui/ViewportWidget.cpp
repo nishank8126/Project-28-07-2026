@@ -616,7 +616,7 @@ void ViewportWindow::GenerateSurfaceForCloud() {
     elevationCache_.Initialize();
 
     surface::ElevationGridParams params;
-    params.resolution = 256;
+    params.resolution = m_terrainGridRes;
     // GroundOnly for DTM/hillshade - prevents vegetation/building spikes
     params.sourceMode = surface::ElevationSourceMode::GroundOnly;
 
@@ -645,41 +645,63 @@ void ViewportWindow::GenerateSurfaceForCloud() {
             auto* sr = GetSurfaceRenderer();
             if (!sr || !m_cloud) return;
 
-            for (uint32_t res : {512u, 1024u, 2048u}) {
+            fprintf(stderr, "[RESOLUTION COMPARISON]\n");
+            for (uint32_t res : {256u, 512u, 1024u}) {
                 surface::ElevationGridParams p;
                 p.resolution = res;
-                p.sourceMode = surface::ElevationSourceMode::AllPoints;
+                p.sourceMode = surface::ElevationSourceMode::GroundOnly;
 
+                auto t0 = std::chrono::steady_clock::now();
                 auto* entry = elevationCache_.GetOrCreate(
                     cloudID, *m_cloud, p);
+                auto t1 = std::chrono::steady_clock::now();
+                double genMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
                 if (entry && entry->isValid) {
+                    const auto& stats = entry->grid.GetStats();
+                    fprintf(stderr,
+                        "  %ux%u: verts=%zu tris=%zu elev=[%.1f,%.1f] "
+                        "Zrange=%.1f bin=%.1fms interp=%.1fms mesh=%.1fms total=%.1fms\n",
+                        res, res,
+                        entry->mesh.VertexCount(), entry->mesh.TriangleCount(),
+                        stats.minElevation, stats.maxElevation,
+                        stats.maxElevation - stats.minElevation,
+                        stats.binningTimeMs, stats.interpolateTimeMs,
+                        stats.meshGenTimeMs, genMs);
+                    fflush(stderr);
+
                     elevationReadyResolution_.store(res,
                         std::memory_order_relaxed);
                     elevationGenComplete_.store(true,
                         std::memory_order_release);
                 }
             }
+            fprintf(stderr, "[RESOLUTION COMPARISON] done\n");
+            fflush(stderr);
         });
 }
 
 void ViewportWindow::SetSurfaceQuality(int quality) {
-    // Low / Medium / High: normal neighbourhood count affects smoothness,
-    // max edge length scales how far triangulation may bridge gaps.
+    // Low / Medium / High: controls terrain grid resolution and normal quality.
+    // Higher resolution = more terrain detail preserved.
     switch (quality) {
         case 0: // Low
             m_surfaceGenParams.normalNeighborCount = 6;
             m_surfaceGenParams.maxEdgeLength = 0.0;   // automatic
             m_surfaceGenParams.adaptiveTriangulation = true;
+            m_terrainGridRes = 256;
             break;
         case 2: // High
             m_surfaceGenParams.normalNeighborCount = 16;
             m_surfaceGenParams.maxEdgeLength = 0.0;   // automatic
             m_surfaceGenParams.adaptiveTriangulation = true;
+            m_terrainGridRes = 1024;
             break;
         default: // Medium
             m_surfaceGenParams.normalNeighborCount = 10;
             m_surfaceGenParams.maxEdgeLength = 0.0;
             m_surfaceGenParams.adaptiveTriangulation = true;
+            m_terrainGridRes = 512;
             break;
     }
 
@@ -688,6 +710,7 @@ void ViewportWindow::SetSurfaceQuality(int quality) {
         auto* sr = GetSurfaceRenderer();
         if (sr) {
             sr->ClearAllMeshes();
+            elevationCache_.Clear();
             GenerateSurfaceForCloud();
         }
     }

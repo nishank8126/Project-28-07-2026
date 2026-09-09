@@ -361,5 +361,101 @@ void ImGuiOverlay::RenderSurfacePanel(surface::SurfaceRenderer& surfaceRenderer,
     ImGui::End();
 }
 
+void ImGuiOverlay::RenderPerformancePanel(RenderContext& context) {
+    ImGui::SetNextWindowPos(ImVec2(950, 10), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(320, 400), ImGuiCond_FirstUseEver);
+    ImGui::Begin("Performance");
+
+    auto& cfg = context.GetConfig();
+    auto& stats = context.GetStats();
+
+    ImGui::Text("FPS: %.1f (%.2f ms)", stats.fps, stats.frameTimeMs);
+    ImGui::Separator();
+
+    // Point Budget
+    ImGui::Text("Point Budget:");
+    const char* budgetLabels[] = {"1M", "2M", "5M", "10M", "20M"};
+    const float budgetValues[] = {1.0f, 2.0f, 5.0f, 10.0f, 20.0f};
+    int currentBudget = 2; // default 5M
+    for (int i = 0; i < 5; i++) {
+        if (std::abs(cfg.pointBudgetMillions - budgetValues[i]) < 0.1f) {
+            currentBudget = i;
+            break;
+        }
+    }
+    if (ImGui::Combo("Budget", &currentBudget, budgetLabels, 5)) {
+        cfg.pointBudgetMillions = budgetValues[currentBudget];
+        cfg.maxPointsPerFrame = static_cast<uint32_t>(budgetValues[currentBudget] * 1'000'000.0f);
+    }
+
+    // Point Size
+    ImGui::Text("Point Size:");
+    const char* sizeLabels[] = {"Auto", "1px", "2px", "3px"};
+    int currentSize = static_cast<int>(cfg.pointSizeMode);
+    if (ImGui::Combo("Size", &currentSize, sizeLabels, 4)) {
+        cfg.pointSizeMode = static_cast<RenderConfig::PointSizeMode>(currentSize);
+    }
+
+    // LOD Quality
+    ImGui::Text("LOD Quality:");
+    const char* lodLabels[] = {"High", "Balanced", "Performance"};
+    int currentLOD = static_cast<int>(cfg.lodQuality);
+    if (ImGui::Combo("Quality", &currentLOD, lodLabels, 3)) {
+        cfg.lodQuality = static_cast<RenderConfig::LODQuality>(currentLOD);
+        // Apply quality presets
+        switch (cfg.lodQuality) {
+            case RenderConfig::LODQuality::High:
+                cfg.pointBudgetMillions = 10.0f;
+                cfg.maxPointsPerFrame = 10'000'000;
+                cfg.lodEnterThreshold = 30.0f;
+                cfg.lodExitThreshold = 40.0f;
+                break;
+            case RenderConfig::LODQuality::Balanced:
+                cfg.pointBudgetMillions = 5.0f;
+                cfg.maxPointsPerFrame = 5'000'000;
+                cfg.lodEnterThreshold = 20.0f;
+                cfg.lodExitThreshold = 30.0f;
+                break;
+            case RenderConfig::LODQuality::Performance:
+                cfg.pointBudgetMillions = 2.0f;
+                cfg.maxPointsPerFrame = 2'000'000;
+                cfg.lodEnterThreshold = 15.0f;
+                cfg.lodExitThreshold = 25.0f;
+                break;
+        }
+    }
+
+    // Streaming Quality
+    ImGui::Text("Streaming:");
+    const char* streamLabels[] = {"Quality", "Balanced", "Fast"};
+    int currentStream = static_cast<int>(cfg.streamingQuality);
+    if (ImGui::Combo("Streaming", &currentStream, streamLabels, 3)) {
+        cfg.streamingQuality = static_cast<RenderConfig::StreamingQuality>(currentStream);
+    }
+
+    ImGui::Separator();
+
+    // LOD Hysteresis
+    ImGui::Text("LOD Hysteresis:");
+    ImGui::SliderFloat("Enter", &cfg.lodEnterThreshold, 5.0f, 50.0f, "%.1f");
+    ImGui::SliderFloat("Exit", &cfg.lodExitThreshold, 10.0f, 60.0f, "%.1f");
+
+    ImGui::Separator();
+
+    // Terrain Settings
+    ImGui::Text("Terrain:");
+    ImGui::SliderFloat("Z Exaggeration", &cfg.verticalExaggeration, 1.0f, 10.0f, "%.1fx");
+
+    ImGui::Separator();
+
+    // Live stats
+    ImGui::Text("Visible Points: %llu", stats.visiblePoints);
+    ImGui::Text("Draw Calls:    %u", stats.drawCalls);
+    ImGui::Text("GPU Compute:   %.3f ms", stats.gpuComputeTimeMs);
+    ImGui::Text("GPU Render:    %.3f ms", stats.gpuRenderTimeMs);
+
+    ImGui::End();
+}
+
 } // namespace renderer
 } // namespace workstation

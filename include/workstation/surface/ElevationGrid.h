@@ -56,6 +56,11 @@ struct ElevationGridStats {
     double interpolateTimeMs = 0.0;
     double meshGenTimeMs = 0.0;
     double totalTimeMs = 0.0;
+    // Terrain quality metrics
+    float meanSlopeDeg = 0.0f;
+    float maxSlopeDeg = 0.0f;
+    float zStddev = 0.0f;
+    float terrainRoughness = 0.0f;  // mean absolute elevation difference from neighbors
 };
 
 class ElevationGrid {

@@ -21,7 +21,7 @@ layout(location = 0) out vec4 outColor;
 // facet-to-facet contrast (not a specular highlight) is what reads as the
 // crisp "faceted" look on a triangulated point-cloud surface.
 vec3 applyPhong(vec3 normal, vec3 lightDir, vec3 /*viewDir*/, vec3 color) {
-    float ambientFloor = fragMaterial.x;
+    float ambientFloor = max(fragMaterial.x, 0.15);
     float NdotL = max(dot(normal, lightDir), 0.0);
     // Contrast curve: push dark slopes deeper while keeping illuminated faces bright.
     // Remap [0,1] -> [0,1] with a smooth S-curve that darkens mid-tones.
@@ -41,8 +41,12 @@ vec3 applySmoothHillshade(vec3 normal, vec3 lightDir, vec3 color) {
     float shade = smoothstep(0.0, 1.0, NdotL);
     // Power curve: 0.5 brightens mid-tones for better terrain visibility
     shade = pow(shade, 0.5);
+    // SAFETY: ambient floor raised to 0.15 minimum to prevent complete
+    // blackout on slopes facing away from the light. Previous 0.1 floor
+    // combined with AO and EDL produced near-black output on large regions.
+    float floor = max(ambientFloor, 0.15);
     // Final: PTCColor × terrainLighting
-    return color * mix(ambientFloor, 1.0, shade);
+    return color * mix(floor, 1.0, shade);
 }
 
 // Ambient occlusion factor based on normal divergence at triangle edges.
@@ -59,7 +63,7 @@ float ComputeAO(vec3 normal) {
 // Used by the MicroStation-style PTC modes so the base classification color
 // is lit rather than replaced.
 vec3 applyBlinnPhong(vec3 normal, vec3 lightDir, vec3 viewDir, vec3 color) {
-    float ambient = fragMaterial.x;
+    float ambient = max(fragMaterial.x, 0.15);
     float diffuse = fragMaterial.y;
     float specular = fragMaterial.z;
     float shininess = max(fragMaterial.w, 1.0);
@@ -95,12 +99,17 @@ vec3 applyEDL(vec3 color, vec3 normal, vec3 viewDir) {
     float depthDiscontinuity = clamp(fwidth(fragDepth) * edlStrength * 50.0, 0.0, 1.0);
     // Silhouette term: surfaces seen edge-on change normal rapidly too.
     float normalTerm = 1.0 - max(dot(normal, viewDir), 0.0);
-    // Stronger depth contrast: bias toward edge darkening for better
-    // terrain crevice and building edge separation
-    float edgeFactor = clamp(normalTerm * 0.6 + depthDiscontinuity * 0.6, 0.0, 1.0);
+    // Edge factor combines depth discontinuity and silhouette detection.
+    // Keep weights moderate (0.4) to avoid over-darkening large flat regions.
+    float edgeFactor = clamp(normalTerm * 0.4 + depthDiscontinuity * 0.4, 0.0, 1.0);
     // Smooth edge falloff for professional look
     edgeFactor = smoothstep(0.0, 1.0, edgeFactor);
-    return color * (1.0 - edgeFactor * edlStrength * 0.6);
+    // SAFETY: never darken below 40% of original color. EDL is for edge
+    // accentuation, not global darkening. Previous 0.6 multiplier with
+    // edlStrength=1.5 could darken to 10%, which combined with AO and
+    // hillshade produced effectively black output on large terrain regions.
+    float edlFactor = clamp(1.0 - edgeFactor * edlStrength * 0.35, 0.4, 1.0);
+    return color * edlFactor;
 }
 
 // Professional terrain elevation colormap: 6-stop ramp

@@ -119,14 +119,15 @@ vec3 GetPTCBaseColor() {
 // matching the material weights already pushed for surface shading).
 vec3 ApplyBlinnPhong(vec3 baseColor, vec3 n, vec3 lightDir, vec3 viewDir) {
     float ndotl = max(dot(n, lightDir), 0.0);
+    float ambient = max(surfaceAmbient, 0.15);
     // Same contrast curve as surface shader for consistent terrain relief
-    float t = max(ndotl - surfaceAmbient, 0.0) / max(1.0 - surfaceAmbient, 0.001);
+    float t = max(ndotl - ambient, 0.0) / max(1.0 - ambient, 0.001);
     float diffContrib = t * t * (3.0 - 2.0 * t);
     vec3 halfDir = normalize(lightDir + viewDir);
     float ndoth = max(dot(n, halfDir), 0.0);
     vec3 specColor = mix(vec3(1.0), baseColor, 0.15);
     vec3 spec = specColor * pow(ndoth, surfaceShininess) * surfaceSpecular;
-    return baseColor * (surfaceAmbient + surfaceDiffuse * diffContrib) + spec;
+    return baseColor * (ambient + surfaceDiffuse * diffContrib) + spec;
 }
 
 // Layer 2b -- Hillshade lighting: single directional light, no specular.
@@ -134,8 +135,9 @@ vec3 ApplyBlinnPhong(vec3 baseColor, vec3 n, vec3 lightDir, vec3 viewDir) {
 // differently) is what reads as terrain relief on a dense LiDAR cloud.
 vec3 ApplyHillshade(vec3 baseColor, vec3 n, vec3 lightDir) {
     float ndotl = max(dot(n, lightDir), 0.0);
-    float t = max(ndotl - surfaceAmbient, 0.0) / max(1.0 - surfaceAmbient, 0.001);
-    float shade = surfaceAmbient + (1.0 - surfaceAmbient) * t * t * (3.0 - 2.0 * t);
+    float ambient = max(surfaceAmbient, 0.15);
+    float t = max(ndotl - ambient, 0.0) / max(1.0 - ambient, 0.001);
+    float shade = ambient + (1.0 - ambient) * t * t * (3.0 - 2.0 * t);
     return baseColor * shade;
 }
 
@@ -143,11 +145,15 @@ vec3 ApplyHillshade(vec3 baseColor, vec3 n, vec3 lightDir) {
 // strength parameter): distance-based depth contrast plus a silhouette term
 // for points seen edge-on. Darkens WITHOUT shifting the base hue -- this is
 // what separates poles from their background and makes cables pop.
+// SAFETY: distance factor uses a much smaller multiplier (0.0002 instead of
+// 0.001) to prevent far points from becoming black. For a point 10km away
+// with old formula: 1/(1+10000*0.001*1.5)=0.0625 (black). New formula:
+// 1/(1+10000*0.0002*1.5)=0.25 (visible). Edge darkening is clamped to 50%.
 vec3 ApplyPointEDL(vec3 baseColor, vec3 n, vec3 viewDir, float dist) {
-    float depthFactor = 1.0 / (1.0 + dist * 0.001 * edlStrength);
+    float depthFactor = 1.0 / (1.0 + dist * 0.0002 * edlStrength);
     float rim = 1.0 - abs(dot(n, viewDir));
     // Stronger rim darkening for better edge separation on poles/cables
-    float edge = clamp(rim * edlStrength * 0.7, 0.0, 0.7);
+    float edge = clamp(rim * edlStrength * 0.5, 0.0, 0.5);
     return baseColor * depthFactor * (1.0 - edge);
 }
 

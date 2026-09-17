@@ -26,6 +26,14 @@ gpu::PreparedGeometry* PointCloudRenderAdapter::PreparePointCloud(
     uint64_t preparedPoints = 0;
     uint64_t nextKey = 0;
 
+    // Phase 2: collect samples for verification
+    struct NodeSample {
+        uint64_t key;
+        uint32_t pointCount;
+        double minX, minY, minZ, maxX, maxY, maxZ;
+    };
+    std::vector<NodeSample> samples;
+
     std::function<void(pointcloud::PointCloudNode*)> walk =
         [&](pointcloud::PointCloudNode* n) {
         if (!n) return;
@@ -38,6 +46,13 @@ gpu::PreparedGeometry* PointCloudRenderAdapter::PreparePointCloud(
             if (geo) {
                 preparedCount++;
                 preparedPoints += n->PointCount();
+
+                // Collect first 5 leaf samples
+                if (samples.size() < 5) {
+                    auto& b = n->bounds();
+                    samples.push_back({key, n->PointCount(),
+                        b.minX, b.minY, b.minZ, b.maxX, b.maxY, b.maxZ});
+                }
             }
         }
         // VoxelNode: key is consumed but no geometry prepared (0 points)
@@ -58,6 +73,17 @@ gpu::PreparedGeometry* PointCloudRenderAdapter::PreparePointCloud(
         "  Prepared points:%llu\n"
         "  Root points:    %llu\n",
         preparedCount, preparedPoints, root->PointCount());
+
+    // Phase 2: Print sampled node verification
+    fprintf(stderr, "\n  [NODE VERIFICATION] Sampled leaf nodes:\n");
+    for (auto& s : samples) {
+        auto* geo = GetPreparedGeometry(s.key);
+        fprintf(stderr,
+            "    key=%llu  points=%u  bounds=[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f]  gpu=%s\n",
+            s.key, s.pointCount,
+            s.minX, s.minY, s.minZ, s.maxX, s.maxY, s.maxZ,
+            (geo && geo->GetPointCount() > 0) ? "OK" : "MISSING");
+    }
     fflush(stderr);
 
     return GetPreparedGeometry(0); // Return root geometry (may be null for VoxelNode root)

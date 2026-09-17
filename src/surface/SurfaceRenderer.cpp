@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -388,23 +389,54 @@ void SurfaceRenderer::Render(VkCommandBuffer cmd, const renderer::Camera& camera
     if (!diagPrinted && !meshes_.empty()) {
         uint32_t totalVerts = GetTotalVertexCount();
         uint32_t totalTris = GetTotalTriangleCount();
-        SLOG_INFO("\n[SHADING GEOMETRY DEBUG]"
-                  "\n  Visualization mode: PTC Shaded"
-                  "\n  Shading mode: %d (%s)"
-                  "\n  Surface mode: %d"
-                  "\n  Rendering object: SurfaceMesh (ElevationGrid/Triangulated)"
-                  "\n  Vertex count: %u"
-                  "\n  Triangle count: %u"
-                  "\n  Normal source: Vertex normal (pre-computed from mesh)"
-                  "\n  Surface GPU buffer: VALID"
-                  "\n  Point GPU buffer: N/A (surface path)",
-                  static_cast<int>(params.shading),
-                  (params.shading == ShadingType::PTCShading) ? "PTCShading" :
-                  (params.shading == ShadingType::PTCEDL) ? "PTCEDL" :
-                  (params.shading == ShadingType::PTCComposite) ? "PTCComposite" :
-                  "Other",
-                  static_cast<int>(params.mode),
-                  totalVerts, totalTris);
+
+        // Compute light direction for debug output
+        constexpr float kPi = 3.14159265358979f;
+        float az = 45.0f, el = 45.0f;
+        float ld[3];
+        {
+            const float azRad = az * kPi / 180.0f;
+            const float elRad = std::clamp(el, 0.0f, 90.0f) * kPi / 180.0f;
+            const float cosEl = std::cos(elRad);
+            ld[0] = cosEl * std::cos(azRad);
+            ld[1] = cosEl * std::sin(azRad);
+            ld[2] = std::sin(elRad);
+        }
+
+        fprintf(stderr,
+            "\n[SHADING GEOMETRY DEBUG]\n"
+            "  Visualization mode: PTC Shaded\n"
+            "  Shading mode: %d (%s)\n"
+            "  Surface mode: %d\n"
+            "  Vertex count: %u\n"
+            "  Triangle count: %u\n"
+            "  Normal source: Vertex normal (pre-computed from mesh)\n"
+            "  Surface GPU buffer: VALID\n"
+            "\n[LIGHT DEBUG]\n"
+            "  Azimuth:   %.1f deg\n"
+            "  Elevation: %.1f deg\n"
+            "  Light X:   %.4f\n"
+            "  Light Y:   %.4f\n"
+            "  Light Z:   %.4f\n"
+            "  ambient:   %.2f\n"
+            "  diffuse:   %.2f\n"
+            "  specular:  %.2f\n"
+            "  shininess: %.1f\n"
+            "  edlStrength: %.2f\n"
+            "\n[ACTIVE PIPELINE]\n"
+            "  Visualization: Surface\n"
+            "  Vertex shader: surface.vert\n"
+            "  Fragment shader: surface.frag\n",
+            static_cast<int>(params.shading),
+            (params.shading == ShadingType::PTCShading) ? "PTCShading" :
+            (params.shading == ShadingType::PTCEDL) ? "PTCEDL" :
+            (params.shading == ShadingType::PTCComposite) ? "PTCComposite" :
+            "Other",
+            static_cast<int>(params.mode),
+            totalVerts, totalTris,
+            az, el, ld[0], ld[1], ld[2],
+            params.ambient, params.diffuse, params.specular,
+            params.shininess, params.edlStrength);
         diagPrinted = true;
     }
 

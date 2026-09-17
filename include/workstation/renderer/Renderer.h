@@ -180,6 +180,7 @@ private:
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
 
     VkPipeline pointPipeline_ = VK_NULL_HANDLE;
+    VkPipeline pointIndirectPipeline_ = VK_NULL_HANDLE;
     VkPipeline debugPipeline_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     VkPipeline cadLinePipeline_ = VK_NULL_HANDLE;
@@ -290,6 +291,19 @@ private:
     uint32_t cloudLoadedAtFrame_ = 0;
     bool frameStarted_ = false;
     bool useImGui_ = false;
+    bool pipelineHealthPrinted_ = false;
+    bool gpuIndirectValidationPrinted_ = false;
+
+    // Draw submission counters (per-frame, reset each frame)
+    struct DrawSubmissionStats {
+        uint32_t vkCmdDraw = 0;
+        uint32_t vkCmdDrawIndexed = 0;
+        uint32_t vkCmdDrawIndirect = 0;
+        uint32_t vkCmdDrawIndirectCount = 0;
+        uint32_t totalPointDraws = 0;
+        uint32_t gpuIndirectActive = 0;  // 1 if GPU indirect path was used this frame
+        uint32_t cpuFallbackActive = 0;  // 1 if CPU per-node path was used this frame
+    } drawSubmission_;
 
     std::unique_ptr<ImGuiOverlay> imguiOverlay_;
 
@@ -300,6 +314,7 @@ private:
     bool CreateRenderPass();
     bool CreateFramebuffers();
     bool CreatePointPipeline();
+    bool CreateIndirectPointPipeline();
     bool CreateComputePipeline();
     bool CreateDebugPipeline();
     bool CreateLinePipeline();

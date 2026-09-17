@@ -54,6 +54,20 @@ static_assert(sizeof(PointPushConstants) == 160,
     "PointPushConstants must be exactly 160 bytes to match GLSL shaders");
 } // namespace
 
+// Interleaved PointVertex matching point_culling.comp's std430 layout:
+// vec4 position (16) + vec4 color (16) + float intensity (4) + float classification (4)
+// + padding (8) + vec3 normal (12) + trailing (4) = 64 bytes
+struct CullPointVertex {
+    float position[4];
+    float color[4];
+    float intensity;
+    float classification;
+    float _pad0[2];
+    float normal[3];
+    float _pad1;
+};
+static_assert(sizeof(CullPointVertex) == 64, "CullPointVertex must be 64 bytes");
+
 Renderer::~Renderer() { Shutdown(); }
 
 bool Renderer::Initialize(const RendererConfig& config) {
@@ -199,6 +213,9 @@ bool Renderer::InitializeInternal(const RendererConfig& config, void* nativeWind
         fprintf(stderr, "Renderer::Initialize: CreatePointPipeline failed\n");
         return false;
     }
+    if (!CreateIndirectPointPipeline()) {
+        fprintf(stderr, "Renderer::Initialize: CreateIndirectPointPipeline failed (non-fatal)\n");
+    }
     if (!CreateDebugPipeline()) {
         fprintf(stderr, "Renderer::Initialize: CreateDebugPipeline failed\n");
         return false;
@@ -269,6 +286,7 @@ void Renderer::Shutdown() {
     framebuffers_.clear();
 
     if (pointPipeline_) pipelineManager_->DestroyPipeline(pointPipeline_);
+    if (pointIndirectPipeline_) pipelineManager_->DestroyPipeline(pointIndirectPipeline_);
     if (debugPipeline_) pipelineManager_->DestroyPipeline(debugPipeline_);
     if (linePipeline_) pipelineManager_->DestroyPipeline(linePipeline_);
     if (cullingComputePipeline_) pipelineManager_->DestroyPipeline(cullingComputePipeline_);
@@ -403,6 +421,7 @@ void Renderer::RenderFrame() {
     context_.GetStats().gpuComputeTimeMs = 0.0;
     context_.GetStats().gpuRenderTimeMs = 0.0;
     visDebugStats_ = {};
+    drawSubmission_ = {};
 
     // Update streaming manager statistics against the real gpu::
     // PointStreamingManager API (GetDebugStats -> RenderContext mirror).
@@ -567,6 +586,8 @@ void Renderer::RenderFrame() {
             }
             UpdatePushConstants(cmd, 0u);
 
+            uint32_t ddDrawCalls = 0;
+            uint64_t ddPoints = 0;
             for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
                 if (!geo || geo->GetPointCount() == 0) continue;
 
@@ -577,7 +598,26 @@ void Renderer::RenderFrame() {
                 geo->BindNormal(cmd, 4);
 
                 geo->Draw(cmd);
+                ddDrawCalls++;
+                ddPoints += geo->GetPointCount();
                 context_.GetStats().drawCalls++;
+                drawSubmission_.vkCmdDraw++;
+                drawSubmission_.totalPointDraws++;
+                drawSubmission_.cpuFallbackActive = 1;
+            }
+
+            static uint32_t ddFrame = 0;
+            if (ddFrame++ % 60 == 0) {
+                fprintf(stderr,
+                    "\n[DIRECT DRAW BASELINE]\n"
+                    "  Draw calls:   %u\n"
+                    "  Total points: %llu\n"
+                    "  Prepared geoms:%zu\n"
+                    "  Mode: %s\n",
+                    ddDrawCalls, ddPoints,
+                    adapter_.GetAllPreparedGeometries().size(),
+                    useDebug ? "Debug" : "ForceDrawAll");
+                fflush(stderr);
             }
         } else {
             auto tVis0 = std::chrono::high_resolution_clock::now();
@@ -664,6 +704,9 @@ void Renderer::RenderFrame() {
 
                     geo->Draw(cmd);
                     context_.GetStats().drawCalls++;
+                    drawSubmission_.vkCmdDraw++;
+                    drawSubmission_.totalPointDraws++;
+                    drawSubmission_.cpuFallbackActive = 1;
                 }
             }
         }
@@ -785,6 +828,42 @@ void Renderer::EndFrame() {
         timestampsSupported_ && timestampQueryPool_;
     timestampFrameIndex_ = (timestampFrameIndex_ + 1) % kMaxTimestampFrames;
 
+    // ================================================================
+    // [COMPUTE OUTPUT COUNT] — periodic per-frame diagnostic
+    // Reads drawCount from the indirect buffer 2 frames after dispatch.
+    // Buffer is host-visible + coherent so no explicit flush needed.
+    // ================================================================
+    if (activeCloud_ && cullingTotalPoints_ > 0 && cullingIndirectBuffer_.mappedData) {
+        static uint32_t computeOutFrame = 0;
+        if (++computeOutFrame % 30 == 0) {
+            uint32_t gpuDrawCount = *static_cast<uint32_t*>(cullingIndirectBuffer_.mappedData);
+            uint32_t capacityPoints = static_cast<uint32_t>(
+                cullingOutputBuffer_.size / sizeof(CullPointVertex));
+            uint32_t rejectedPoints = (gpuDrawCount <= cullingTotalPoints_)
+                ? cullingTotalPoints_ - gpuDrawCount : 0;
+
+            fprintf(stderr,
+                "\n[COMPUTE OUTPUT COUNT]\n"
+                "  Input points:     %u\n"
+                "  GPU drawCount:    %u\n"
+                "  Rejected points:  %u\n"
+                "  Rejection rate:   %.1f%%\n"
+                "  maxOutputPoints:  %u\n"
+                "  Buffer capacity:  %u\n"
+                "  Capacity check:   %s\n"
+                "  Budget check:     %s\n",
+                cullingTotalPoints_,
+                gpuDrawCount,
+                rejectedPoints,
+                cullingTotalPoints_ > 0 ? (100.0 * rejectedPoints / cullingTotalPoints_) : 0.0,
+                context_.GetConfig().maxPointsPerFrame,
+                capacityPoints,
+                (gpuDrawCount <= capacityPoints) ? "PASS" : "FAIL - OVERFLOW",
+                (gpuDrawCount <= context_.GetConfig().maxPointsPerFrame) ? "PASS" : "FAIL - over budget");
+            fflush(stderr);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // FRAME PERFORMANCE SUMMARY
     // -----------------------------------------------------------------------
@@ -881,12 +960,20 @@ void Renderer::EndFrame() {
                 "  Indirect commands:%u\n"
                 "  Draw calls:       %u (CPU) / %u (GPU indirect)\n"
                 "  GPU Cull dispatches: %u\n"
+                "  Active path:      %s\n"
+                "  GPU drawCount:    %u\n"
                 "\n"
                 "MEMORY:\n"
                 "  RAM:              %llu MB\n"
                 "  VRAM:             %llu / %llu MB\n"
                 "  Resident tiles:   %u\n"
                 "  Cache hit rate:   %.1f%%\n"
+                "\n"
+                "GPU BUFFERS:\n"
+                "  Input:            %.1f MB\n"
+                "  Output:           %.1f MB\n"
+                "  Indirect:         %llu bytes\n"
+                "  Capacity:         %u points\n"
                 "\n"
                 "STREAMING:\n"
                 "  Uploads/frame:    %u\n"
@@ -923,15 +1010,190 @@ void Renderer::EndFrame() {
                 framePerf_.cpuDrawCalls,
                 framePerf_.drawCalls,
                 framePerf_.gpuCullingDispatches,
+                // Active path
+                (cullingTotalPoints_ > 0 && pointIndirectPipeline_ != VK_NULL_HANDLE &&
+                 cullingIndirectBuffer_.mappedData &&
+                 *static_cast<uint32_t*>(cullingIndirectBuffer_.mappedData) > 0)
+                    ? "GPU INDIRECT" : "CPU FALLBACK",
+                (cullingIndirectBuffer_.mappedData)
+                    ? *static_cast<uint32_t*>(cullingIndirectBuffer_.mappedData) : 0,
                 framePerf_.ramUsed / (1024*1024),
                 framePerf_.vramAvailable / (1024*1024), framePerf_.vramUsed / (1024*1024),
                 framePerf_.loadedTiles,
                 framePerf_.cacheHitRate * 100.0,
+                // GPU buffers
+                cullingInputBuffer_.size / (1024.0 * 1024.0),
+                cullingOutputBuffer_.size / (1024.0 * 1024.0),
+                (unsigned long long)cullingIndirectBuffer_.size,
+                static_cast<uint32_t>(cullingOutputBuffer_.size / sizeof(CullPointVertex)),
                 framePerf_.uploadsPerFrame,
                 framePerf_.mbUploaded,
                 framePerf_.tileReuseHits,
                 framePerf_.shadingMode,
                 context_.GetStats().fps, context_.GetStats().frameTimeMs);
+            fflush(stderr);
+
+            // ================================================================
+            // [DRAW SUBMISSION] — proves actual Vulkan draw call path
+            // ================================================================
+            fprintf(stderr,
+                "\n[DRAW SUBMISSION]\n"
+                "  CPU vkCmdDraw calls:           %u\n"
+                "  CPU vkCmdDrawIndexed calls:    %u\n"
+                "  CPU vkCmdDrawIndirect calls:   %u\n"
+                "  CPU vkCmdDrawIndirectCount:    %u\n"
+                "  Total point draw submissions:  %u\n"
+                "  GPU indirect active:           %s\n"
+                "  CPU fallback active:           %s\n"
+                "  VERDICT: %s\n",
+                drawSubmission_.vkCmdDraw,
+                drawSubmission_.vkCmdDrawIndexed,
+                drawSubmission_.vkCmdDrawIndirect,
+                drawSubmission_.vkCmdDrawIndirectCount,
+                drawSubmission_.totalPointDraws,
+                drawSubmission_.gpuIndirectActive ? "YES" : "NO",
+                drawSubmission_.cpuFallbackActive ? "YES" : "NO",
+                drawSubmission_.vkCmdDrawIndirect > 0 && drawSubmission_.vkCmdDraw == 0
+                    ? "TRUE GPU INDIRECT — CPU draws eliminated"
+                    : drawSubmission_.vkCmdDrawIndirect > 0 && drawSubmission_.vkCmdDraw > 0
+                        ? "MIXED — both GPU indirect and CPU draws active"
+                        : "CPU FALLBACK — no GPU indirect draws");
+            fflush(stderr);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // CONSOLIDATED PIPELINE HEALTH CHECK - fires once on first frame after load
+    // -----------------------------------------------------------------------
+    if (activeCloud_ && !pipelineHealthPrinted_ &&
+        frameNumber_ > cloudLoadedAtFrame_) {
+        pipelineHealthPrinted_ = true;
+
+        const auto& streamStats = streamingManager_
+            ? streamingManager_->GetDebugStats()
+            : gpu::StreamingDebugStats{};
+
+        VmaBudget budgets[1] = {};
+        vmaGetHeapBudgets(vulkan::VulkanAllocator::Get().GetAllocator(), budgets);
+
+        fprintf(stderr,
+            "\n"
+            "================================================================\n"
+            "[PIPELINE HEALTH]\n"
+            "================================================================\n"
+            "LAS loaded:        YES\n"
+            "Point count:       %llu\n"
+            "Bounds:            [%.3f, %.3f, %.3f] - [%.3f, %.3f, %.3f]\n"
+            "\n"
+            "OCTREE:\n"
+            "  Total nodes:     %u\n"
+            "  Leaf nodes:      %u\n"
+            "  Root points:     %llu\n"
+            "\n"
+            "PIPELINE:\n"
+            "  Prepared geoms:  %zu\n"
+            "  SpatialTree:     %zu nodes\n"
+            "  Streaming nodes: %u resident / %u requested\n"
+            "  GPU buffers:     %u\n"
+            "  Resident nodes:  %u\n"
+            "\n"
+            "RENDERING (frame %u):\n"
+            "  Visible nodes:   %zu\n"
+            "  Selected nodes:  %zu\n"
+            "  Drawn nodes:     %u\n"
+            "  Drawn points:    %llu\n"
+            "  Visible points:  %llu\n"
+            "  Indirect cmds:   %u\n"
+            "  CPU draw calls:  %u\n"
+            "  GPU cull dispatches: %u\n"
+            "\n"
+            "MEMORY:\n"
+            "  VRAM used:       %llu MB\n"
+            "  VRAM budget:     %llu MB\n"
+            "\n"
+            "GPU INDIRECT BUFFERS:\n"
+            "  Input buffer:    %llu bytes (%.1f MB)\n"
+            "  Output buffer:   %llu bytes (%.1f MB)\n"
+            "  Indirect buffer: %llu bytes\n"
+            "  Vertex stride:   %zu bytes\n"
+            "  Capacity points: %u\n"
+            "  maxOutputPoints: %u\n"
+            "  Capacity check:  %s\n"
+            "\n"
+            "FPS: %.1f (%.2f ms)\n"
+            "================================================================\n",
+            activeCloud_->PointCount(),
+            activeCloud_->Root()->bounds().minX,
+            activeCloud_->Root()->bounds().minY,
+            activeCloud_->Root()->bounds().minZ,
+            activeCloud_->Root()->bounds().maxX,
+            activeCloud_->Root()->bounds().maxY,
+            activeCloud_->Root()->bounds().maxZ,
+            // Octree
+            visDebugStats_.totalNodes,
+            static_cast<uint32_t>(spatialTree_.Size()),
+            activeCloud_->Root()->PointCount(),
+            // Pipeline
+            adapter_.GetAllPreparedGeometries().size(),
+            spatialTree_.Size(),
+            streamStats.gpuResidentNodes,
+            streamStats.requestedNodes,
+            context_.GetStats().gpuBuffers,
+            streamStats.gpuResidentNodes,
+            // Rendering
+            frameNumber_,
+            visibleNodeKeys_.size(),
+            selectedNodeKeys_.size(),
+            framePerf_.drawCalls,
+            framePerf_.renderedPoints,
+            framePerf_.visiblePoints,
+            framePerf_.indirectDraws,
+            framePerf_.cpuDrawCalls,
+            framePerf_.gpuCullingDispatches,
+            // Memory
+            budgets[0].usage / (1024 * 1024),
+            budgets[0].budget / (1024 * 1024),
+            // GPU indirect buffers
+            (unsigned long long)cullingInputBuffer_.size,
+            cullingInputBuffer_.size / (1024.0 * 1024.0),
+            (unsigned long long)cullingOutputBuffer_.size,
+            cullingOutputBuffer_.size / (1024.0 * 1024.0),
+            (unsigned long long)cullingIndirectBuffer_.size,
+            sizeof(CullPointVertex),
+            static_cast<uint32_t>(cullingOutputBuffer_.size / sizeof(CullPointVertex)),
+            context_.GetConfig().maxPointsPerFrame,
+            (cullingOutputBuffer_.size / sizeof(CullPointVertex)) >= context_.GetConfig().maxPointsPerFrame
+                ? "PASS" : "FAIL",
+            // FPS
+            context_.GetStats().fps, context_.GetStats().frameTimeMs);
+        fflush(stderr);
+
+        // Phase 2: Cross-reference verification — adapter vs spatial tree
+        {
+            uint32_t adapterKeys = static_cast<uint32_t>(adapter_.GetAllPreparedGeometries().size());
+            uint32_t treeKeys = static_cast<uint32_t>(spatialTree_.Size());
+            uint32_t mismatchedKeys = 0;
+
+            // Sample: check first 10 adapter keys exist in spatial tree
+            uint32_t checked = 0;
+            for (auto& [key, geo] : adapter_.GetAllPreparedGeometries()) {
+                if (checked >= 10) break;
+                auto* node = spatialTree_.Find(key);
+                if (!node || node->pointCount == 0) {
+                    mismatchedKeys++;
+                }
+                checked++;
+            }
+
+            fprintf(stderr,
+                "\n[KEY CONSISTENCY]\n"
+                "  Adapter keys:   %u\n"
+                "  SpatialTree:    %u\n"
+                "  Match:          %s\n"
+                "  (sampled %u keys, %u mismatches)\n",
+                adapterKeys, treeKeys,
+                (adapterKeys == treeKeys && mismatchedKeys == 0) ? "PASS" : "FAIL",
+                checked, mismatchedKeys);
             fflush(stderr);
         }
     }
@@ -946,6 +1208,8 @@ void Renderer::EndFrame() {
 void Renderer::SetPointCloud(pointcloud::PointCloud* cloud) {
     activeCloud_ = cloud;
     cloudLoadedAtFrame_ = frameNumber_;
+    pipelineHealthPrinted_ = false;
+    gpuIndirectValidationPrinted_ = false;
     if (auto* classificationTool = toolManager_.GetClassificationTool()) {
         classificationTool->SetTargetCloud(cloud);
     }
@@ -1392,6 +1656,20 @@ void Renderer::BuildSpatialTreeFromCloud(pointcloud::PointCloud& cloud) {
         "  Total points: %llu\n"
         "  Root points:  %llu\n",
         nodeCount, leafCount, totalPoints, root->PointCount());
+
+    // Phase 2: Sample spatial tree leaves to verify consistency
+    fprintf(stderr, "  [SPATIAL TREE VERIFICATION] First 5 leaves:\n");
+    uint32_t sampleCount = 0;
+    spatialTree_.Traverse([&](spatial::SpatialNode& node) {
+        if (sampleCount >= 5) return;
+        fprintf(stderr,
+            "    key=%llu  points=%u  bounds=[%.3f,%.3f,%.3f]-[%.3f,%.3f,%.3f]\n",
+            node.key, node.pointCount,
+            node.bounds.minX, node.bounds.minY, node.bounds.minZ,
+            node.bounds.maxX, node.bounds.maxY, node.bounds.maxZ);
+        sampleCount++;
+    });
+
     fflush(stderr);
 }
 
@@ -1606,20 +1884,6 @@ void Renderer::AutoSelectDefaults() {
     fflush(stderr);
 }
 
-// Interleaved PointVertex matching point_culling.comp's std430 layout:
-// vec4 position (16) + vec4 color (16) + float intensity (4) + float classification (4)
-// + padding (8) + vec3 normal (12) + trailing (4) = 64 bytes
-struct CullPointVertex {
-    float position[4];
-    float color[4];
-    float intensity;
-    float classification;
-    float _pad0[2];
-    float normal[3];
-    float _pad1;
-};
-static_assert(sizeof(CullPointVertex) == 64, "CullPointVertex must be 64 bytes");
-
 void Renderer::BuildCullingBuffers() {
     if (!activeCloud_ || !adapter_.GetPreparedGeometry(0)) {
         cullingTotalPoints_ = 0;
@@ -1692,13 +1956,13 @@ void Renderer::BuildCullingBuffers() {
         cullingInputBuffer_.mappedData = cullingInputBuffer_.allocationInfo.pMappedData;
     }
 
-    // Allocate output SSBO (device-local)
+    // Allocate output SSBO (device-local, also transfer dst for vkCmdFillBuffer zeroing)
     cullingOutputBuffer_ = {};
     {
         VkBufferCreateInfo bufInfo{};
         bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufInfo.size = outputSize;
-        bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
@@ -1708,13 +1972,13 @@ void Renderer::BuildCullingBuffers() {
         cullingOutputBuffer_.size = outputSize;
     }
 
-    // Allocate indirect draw command buffer (host-visible, cleared each frame)
+    // Allocate indirect draw command buffer (host-visible, cleared each frame via command buffer)
     cullingIndirectBuffer_ = {};
     {
         VkBufferCreateInfo bufInfo{};
         bufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bufInfo.size = indirectSize;
-        bufInfo.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bufInfo.usage = VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         VmaAllocator vma = vulkan::VulkanAllocator::Get().GetAllocator();
         VmaAllocationCreateInfo allocInfo{};
         allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
@@ -1810,11 +2074,31 @@ void Renderer::DispatchCullingComputeShader() {
     auto& frame = frameManager_->GetCurrentFrame();
     VkCommandBuffer cmd = commandBuffers_[frame.imageIndex];
 
-    // Clear the indirect buffer's drawCount to 0 before dispatch
-    if (cullingIndirectBuffer_.mappedData) {
-        uint32_t* drawCount = static_cast<uint32_t*>(cullingIndirectBuffer_.mappedData);
-        drawCount[0] = 0; // vertexCount = drawCount (renamed in shader)
+    // Clear the indirect buffer via command buffer (NOT mapped pointer — avoids
+    // race with previous frame's GPU execution of vkCmdDrawIndirect).
+    {
+        VkDrawIndirectCommand clearCmd{};
+        clearCmd.vertexCount = 0;
+        clearCmd.instanceCount = 1;
+        clearCmd.firstVertex = 0;
+        clearCmd.firstInstance = 0;
+        vkCmdUpdateBuffer(cmd, cullingIndirectBuffer_.buffer, 0,
+                          sizeof(VkDrawIndirectCommand), &clearCmd);
     }
+
+    // Zero-fill the output buffer so rejected points leave no stale data
+    // (atomicAdd on drawCount may exceed actual writes due to budget rejections)
+    vkCmdFillBuffer(cmd, cullingOutputBuffer_.buffer, 0, cullingOutputBuffer_.size, 0);
+
+    // Barrier: transfer write → compute shader read
+    VkMemoryBarrier fillBarrier{};
+    fillBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         0, 1, &fillBarrier, 0, nullptr, 0, nullptr);
 
     // Write timestamp: compute start
     uint32_t tsBase = timestampFrameIndex_ * kTimestampQueriesPerFrame;
@@ -1926,8 +2210,11 @@ void Renderer::ReadTimestampQueries() {
     if (res == VK_SUCCESS) {
         tf.timestamps[0] = results[0];
         tf.timestamps[1] = results[1];
+        tf.timestamps[2] = results[2];
+        tf.timestamps[3] = results[3];
         tf.gpuComputeMs = (results[1] - results[0]) * timestampPeriodMs_;
-        tf.gpuTotalMs = tf.gpuComputeMs; // Will be extended by render timestamps
+        tf.gpuRenderMs = (results[3] - results[2]) * timestampPeriodMs_;
+        tf.gpuTotalMs = tf.gpuComputeMs + tf.gpuRenderMs;
     }
 }
 
@@ -1957,6 +2244,9 @@ void Renderer::DrawVisibleNodes(VkCommandBuffer cmd) {
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
+        drawSubmission_.vkCmdDraw++;
+        drawSubmission_.totalPointDraws++;
+        drawSubmission_.cpuFallbackActive = 1;
     }
 }
 
@@ -2048,14 +2338,218 @@ void Renderer::StartBenchmark(uint32_t frames) {
 }
 
 void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
+    // GPU INDIRECT PATH: When GPU culling is active, ALWAYS record a single
+    // vkCmdDrawIndirect. The compute shader writes drawCount into the indirect
+    // buffer on the GPU. The CPU cannot read drawCount before the GPU executes
+    // (it would always see 0), so we unconditionally record the indirect draw.
+    // If drawCount ends up 0, vkCmdDrawIndirect is a harmless no-op.
+    if (cullingTotalPoints_ > 0 && pointIndirectPipeline_ != VK_NULL_HANDLE &&
+        cullingOutputBuffer_.IsValid() && cullingIndirectBuffer_.IsValid()) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pointIndirectPipeline_);
+        if (classificationDescriptorSet_ != VK_NULL_HANDLE) {
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pointPipelineLayout_, 0, 1, &classificationDescriptorSet_, 0, nullptr);
+        }
+        UpdatePushConstants(cmd, 0u);
+
+        VkBuffer vbuf = cullingOutputBuffer_.buffer;
+        VkDeviceSize voffset = 0;
+        vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf, &voffset);
+
+        vkCmdDrawIndirect(cmd, cullingIndirectBuffer_.buffer, 0, 1, sizeof(VkDrawIndirectCommand));
+
+        context_.GetStats().drawCalls++;
+        context_.GetStats().indirectDraws++;
+        drawSubmission_.vkCmdDrawIndirect++;
+        drawSubmission_.totalPointDraws++;
+        drawSubmission_.gpuIndirectActive = 1;
+
+        // ================================================================
+        // ONE-SHOT: GPU INDIRECT VALIDATION (fires once on first indirect draw)
+        // ================================================================
+        if (!gpuIndirectValidationPrinted_) {
+            gpuIndirectValidationPrinted_ = true;
+
+            uint32_t capacityPoints = static_cast<uint32_t>(
+                cullingOutputBuffer_.size / sizeof(CullPointVertex));
+            uint32_t maxOutput = context_.GetConfig().maxPointsPerFrame;
+
+            fprintf(stderr,
+                "\n================================================================\n"
+                "[GPU INDIRECT VALIDATION]\n"
+                "================================================================\n"
+                "\n"
+                "INDIRECT POINT PIPELINE:\n"
+                "  Primitive topology:  POINT_LIST (confirmed in CreateIndirectPointPipeline via SetDefaults)\n"
+                "  Pipeline handle:     %p\n"
+                "  Pipeline layout:     %p (same as regular point pipeline)\n"
+                "  Shaders:             point.vert + point.frag (same as regular)\n"
+                "\n"
+                "POINT PIPELINE COMPARISON:\n"
+                "  Regular pipeline:    %p\n"
+                "  Indirect pipeline:   %p\n"
+                "  Same layout:         YES (pointPipelineLayout_)\n"
+                "  Same shaders:        YES (point.vert + point.frag)\n"
+                "  Regular topology:    POINT_LIST (SetDefaults)\n"
+                "  Indirect topology:   POINT_LIST (SetDefaults)\n"
+                "  Regular vertex:      5 separate buffers (vec3 each)\n"
+                "  Indirect vertex:     1 interleaved buffer (64-byte CullPointVertex)\n"
+                "\n"
+                "PIPELINE STATUS:\n"
+                "  GPU indirect pipeline: %s\n"
+                "  Compute pipeline:      %s\n"
+                "  Output buffer:         %s\n"
+                "  Indirect buffer:       %s\n"
+                "  Compute dispatch:      %s\n"
+                "  vkCmdDrawIndirect:     YES (recorded)\n"
+                "\n"
+                "COMPUTE OUTPUT (CPU-side, may be stale from prev frame):\n"
+                "  Input points:   %u\n"
+                "  maxOutputPts:   %u\n"
+                "  Buffer capacity: %u\n"
+                "  Capacity check:  %s\n"
+                "\n"
+                "VERTEX LAYOUT VALIDATION:\n"
+                "  Stride:         %zu bytes (CullPointVertex)\n"
+                "  Position:       offset=0  VK_FORMAT_R32G32B32A32_SFLOAT (shader: vec3 — w discarded)\n"
+                "  Color:          offset=16 VK_FORMAT_R32G32B32A32_SFLOAT (shader: vec3 — w discarded)\n"
+                "  Intensity:      offset=32 VK_FORMAT_R32_SFLOAT\n"
+                "  Classification: offset=36 VK_FORMAT_R32_SFLOAT\n"
+                "  Normal:         offset=48 VK_FORMAT_R32G32B32_SFLOAT\n"
+                "\n"
+                "BUFFER CAPACITY:\n"
+                "  Output buffer bytes:   %llu\n"
+                "  Vertex stride:         %zu\n"
+                "  Capacity points:       %u\n"
+                "  Configured maxOutput:  %u\n"
+                "  Capacity check:        %s\n"
+                "\n"
+                "MEMORY:\n"
+                "  Input buffer:  %p (%llu bytes)\n"
+                "  Output buffer: %p (%llu bytes)\n"
+                "  Indirect buf:  %p (%llu bytes)\n"
+                "\n"
+                "COMPUTE SHADER INPUT BUFFER (first 5 vertices):\n",
+                // Pipeline status
+                (void*)pointIndirectPipeline_,
+                (void*)pointPipelineLayout_,
+                (void*)pointPipeline_,
+                (void*)pointIndirectPipeline_,
+                pointIndirectPipeline_ != VK_NULL_HANDLE ? "VALID" : "INVALID",
+                cullingComputePipeline_ != VK_NULL_HANDLE ? "VALID" : "INVALID",
+                cullingOutputBuffer_.IsValid() ? "VALID" : "INVALID",
+                cullingIndirectBuffer_.IsValid() ? "VALID" : "INVALID",
+                (context_.GetStats().gpuCullingDispatches > 0) ? "YES" : "NO",
+                // Compute output
+                cullingTotalPoints_,
+                maxOutput,
+                capacityPoints,
+                (capacityPoints >= maxOutput) ? "PASS" : "FAIL",
+                // Vertex layout
+                sizeof(CullPointVertex),
+                // Buffer capacity
+                (unsigned long long)cullingOutputBuffer_.size,
+                sizeof(CullPointVertex),
+                capacityPoints,
+                maxOutput,
+                (maxOutput <= capacityPoints) ? "PASS" : "FAIL",
+                // Memory
+                (void*)cullingInputBuffer_.buffer, (unsigned long long)cullingInputBuffer_.size,
+                (void*)cullingOutputBuffer_.buffer, (unsigned long long)cullingOutputBuffer_.size,
+                (void*)cullingIndirectBuffer_.buffer, (unsigned long long)cullingIndirectBuffer_.size);
+            fflush(stderr);
+
+            // Sample first 5 input vertices to verify data integrity
+            if (cullingInputBuffer_.mappedData && cullingTotalPoints_ > 0) {
+                auto* verts = static_cast<CullPointVertex*>(cullingInputBuffer_.mappedData);
+                uint32_t sampleCount = std::min(cullingTotalPoints_, 5u);
+                for (uint32_t i = 0; i < sampleCount; ++i) {
+                    auto& v = verts[i];
+                    bool posFinite = std::isfinite(v.position[0]) && std::isfinite(v.position[1]) && std::isfinite(v.position[2]);
+                    bool colFinite = std::isfinite(v.color[0]) && std::isfinite(v.color[1]) && std::isfinite(v.color[2]);
+                    bool normalFinite = std::isfinite(v.normal[0]) && std::isfinite(v.normal[1]) && std::isfinite(v.normal[2]);
+                    fprintf(stderr,
+                        "  Vertex %u:\n"
+                        "    position:  (%.4f, %.4f, %.4f, %.4f) %s\n"
+                        "    color:     (%.4f, %.4f, %.4f, %.4f) %s\n"
+                        "    intensity: %.4f\n"
+                        "    class:     %.1f\n"
+                        "    normal:    (%.4f, %.4f, %.4f) %s\n",
+                        i,
+                        v.position[0], v.position[1], v.position[2], v.position[3],
+                        posFinite ? "OK" : "INVALID",
+                        v.color[0], v.color[1], v.color[2], v.color[3],
+                        colFinite ? "OK" : "INVALID",
+                        v.intensity, v.classification,
+                        v.normal[0], v.normal[1], v.normal[2],
+                        normalFinite ? "OK" : "INVALID");
+                }
+
+                // Print dataset bounds from first/last valid positions
+                float minX = 1e30f, maxX = -1e30f;
+                float minY = 1e30f, maxY = -1e30f;
+                float minZ = 1e30f, maxZ = -1e30f;
+                uint32_t finiteCount = 0;
+                uint32_t limit = std::min(cullingTotalPoints_, 10000u);
+                for (uint32_t i = 0; i < limit; ++i) {
+                    auto& v = verts[i];
+                    if (!std::isfinite(v.position[0]) || !std::isfinite(v.position[1]) || !std::isfinite(v.position[2]))
+                        continue;
+                    minX = std::min(minX, v.position[0]);
+                    maxX = std::max(maxX, v.position[0]);
+                    minY = std::min(minY, v.position[1]);
+                    maxY = std::max(maxY, v.position[1]);
+                    minZ = std::min(minZ, v.position[2]);
+                    maxZ = std::max(maxZ, v.position[2]);
+                    finiteCount++;
+                }
+                fprintf(stderr,
+                    "\n  INPUT BUFFER BOUNDS (sampled %u of %u points):\n"
+                    "    X: [%.3f .. %.3f]\n"
+                    "    Y: [%.3f .. %.3f]\n"
+                    "    Z: [%.3f .. %.3f]\n"
+                    "    Finite positions: %u / %u\n"
+                    "\n"
+                    "NOTE: drawCount is written by compute shader on GPU.\n"
+                    "      CPU reads stale data during command recording.\n"
+                    "      vkCmdDrawIndirect reads correct count on GPU.\n"
+                    "================================================================\n",
+                    finiteCount, cullingTotalPoints_,
+                    minX, maxX, minY, maxY, minZ, maxZ,
+                    finiteCount, limit);
+            } else {
+                fprintf(stderr,
+                    "\n  INPUT BUFFER: NOT MAPPED or 0 points\n"
+                    "\n"
+                    "NOTE: drawCount is written by compute shader on GPU.\n"
+                    "      CPU reads stale data during command recording.\n"
+                    "      vkCmdDrawIndirect reads correct count on GPU.\n"
+                    "================================================================\n");
+            }
+            fflush(stderr);
+        }
+
+        static uint32_t igFrame = 0;
+        if (igFrame++ % 60 == 0) {
+            fprintf(stderr,
+                "\n[GPU INDIRECT]\n"
+                "  Path:         vkCmdDrawIndirect (GPU decides drawCount)\n"
+                "  Pipeline:     pointIndirectPipeline_\n"
+                "  Buffer:       %p (interleaved 64-byte CullPointVertex)\n"
+                "  Total points: %u\n",
+                (void*)cullingOutputBuffer_.buffer, cullingTotalPoints_);
+            fflush(stderr);
+        }
+        return;
+    }
+
+    // CPU FALLBACK PATH: Per-node draw calls (when GPU culling is inactive)
     uint32_t drawnNodes = 0;
     uint64_t drawnPoints = 0;
     for (uint64_t key : selectedNodeKeys_) {
         auto* geo = adapter_.GetPreparedGeometry(key);
         if (!geo || geo->GetPointCount() == 0) continue;
 
-        // Geometry prepared by the adapter (via PreparePointCloud) is already
-        // uploaded to GPU buffers and is always drawable.
         if (streamingManager_ &&
             !streamingManager_->IsNodeResident(key) &&
             adapter_.GetPreparedGeometry(key) == nullptr) {
@@ -2077,6 +2571,9 @@ void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
         geo->Draw(cmd);
 
         context_.GetStats().drawCalls++;
+        drawSubmission_.vkCmdDraw++;
+        drawSubmission_.totalPointDraws++;
+        drawSubmission_.cpuFallbackActive = 1;
     }
 
     // Pipeline node count verification (once per frame)
@@ -2091,12 +2588,14 @@ void Renderer::DrawResidentNodes(VkCommandBuffer cmd) {
                 "  Drawn nodes:    %u\n"
                 "  Drawn points:   %llu\n"
                 "  Spatial tree:   %zu nodes\n"
-                "  Adapter geoms:  %zu\n",
+                "  Adapter geoms:  %zu\n"
+                "  GPU culling:    %s (drawCount=0 or pipeline unavailable)\n",
                 visibleNodeKeys_.size(),
                 selectedNodeKeys_.size(),
                 drawnNodes, drawnPoints,
                 spatialTree_.Size(),
-                adapter_.GetAllPreparedGeometries().size());
+                adapter_.GetAllPreparedGeometries().size(),
+                (cullingTotalPoints_ > 0) ? "available but no visible points" : "inactive");
             fflush(stderr);
         }
     }
@@ -2274,6 +2773,68 @@ bool Renderer::CreatePointPipeline() {
     }
 
     return pointPipeline_ != VK_NULL_HANDLE;
+}
+
+bool Renderer::CreateIndirectPointPipeline() {
+    // Indirect pipeline: same shaders, same pipeline layout, but single
+    // interleaved vertex buffer (64-byte CullPointVertex from compute output).
+#ifdef _WIN32
+    std::string shaderDir = GetExeShaderDir();
+#else
+    const char* basePath = SDL_GetBasePath();
+    std::string shaderDir = basePath ? std::string(basePath) + "shaders/" : "shaders/";
+#endif
+
+    auto shaders = shaderManager_->LoadSPIRVFiles({
+        {shaderDir + "point.vert.spv", VK_SHADER_STAGE_VERTEX_BIT},
+        {shaderDir + "point.frag.spv", VK_SHADER_STAGE_FRAGMENT_BIT}
+    });
+    for (auto& shader : shaders) {
+        if (shader.module == VK_NULL_HANDLE) {
+            fprintf(stderr, "Renderer::CreateIndirectPointPipeline: failed to load shaders\n");
+            return false;
+        }
+    }
+
+    vulkan::PipelineConfig pconfig;
+    pconfig.SetDefaults();
+    pconfig.colorFormat = swapchain_->GetImageFormat();
+    pconfig.depthFormat = vulkan::ChooseDepthFormat(device_->GetPhysicalDeviceInfo().GetDevice());
+
+    // Single interleaved vertex buffer matching CullPointVertex (64 bytes):
+    //   offset  0: vec4 position  (R32G32B32A32_SFLOAT)
+    //   offset 16: vec4 color     (R32G32B32A32_SFLOAT)
+    //   offset 32: float intensity (R32_SFLOAT)
+    //   offset 36: float classification (R32_SFLOAT)
+    //   offset 48: vec3 normal    (R32G32B32_SFLOAT)
+    pconfig.vertexBindings = {
+        {0, sizeof(CullPointVertex), VK_VERTEX_INPUT_RATE_VERTEX},
+    };
+    pconfig.vertexAttributes = {
+        {0, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CullPointVertex, position)},
+        {1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(CullPointVertex, color)},
+        {2, 0, VK_FORMAT_R32_SFLOAT,          offsetof(CullPointVertex, intensity)},
+        {3, 0, VK_FORMAT_R32_SFLOAT,          offsetof(CullPointVertex, classification)},
+        {4, 0, VK_FORMAT_R32G32B32_SFLOAT,    offsetof(CullPointVertex, normal)},
+    };
+    pconfig.vertexInput.vertexBindingDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexBindings.size());
+    pconfig.vertexInput.pVertexBindingDescriptions = pconfig.vertexBindings.data();
+    pconfig.vertexInput.vertexAttributeDescriptionCount =
+        static_cast<uint32_t>(pconfig.vertexAttributes.size());
+    pconfig.vertexInput.pVertexAttributeDescriptions = pconfig.vertexAttributes.data();
+
+    pointIndirectPipeline_ = pipelineManager_->CreateGraphicsPipeline(
+        pointPipelineLayout_, shaders, pconfig, renderPass_->GetRenderPass());
+
+    for (auto& shader : shaders) {
+        shaderManager_->DestroyShaderModule(shader.module);
+    }
+
+    fprintf(stderr, "[Renderer] Indirect point pipeline created: %s\n",
+            pointIndirectPipeline_ != VK_NULL_HANDLE ? "OK" : "FAILED");
+    fflush(stderr);
+    return pointIndirectPipeline_ != VK_NULL_HANDLE;
 }
 
 bool Renderer::CreateDebugPipeline() {
@@ -2504,11 +3065,30 @@ void Renderer::UpdatePushConstants(VkCommandBuffer cmd, uint32_t lodLevel) {
     if (logCounter++ < 5 || (logCounter % 120 == 0)) {
         // clsSet is the SAME descriptor set bound for every visualization mode
         // (flat PTC included) -- identical handle proves identical SSBO source.
-        fprintf(stderr, "[Renderer] PushConstants: vizMode=%u hasCustomPalette=%u clsSet=%p light=(%.2f,%.2f,%.2f) lod=%u\n",
-                pc.visualizationMode, pc.hasCustomPalette,
-                (void*)classificationDescriptorSet_,
-                pc.lightDirection[0], pc.lightDirection[1], pc.lightDirection[2],
-                pc.lodLevel);
+        fprintf(stderr,
+            "\n[ACTIVE PIPELINE]\n"
+            "  Visualization: Point\n"
+            "  Vertex shader: point.vert\n"
+            "  Fragment shader: point.frag\n"
+            "  vizMode=%u hasCustomPalette=%u\n"
+            "  clsSet=%p lod=%u\n"
+            "\n[LIGHT DEBUG]\n"
+            "  Azimuth:   %.1f deg\n"
+            "  Elevation: %.1f deg\n"
+            "  Light X:   %.4f\n"
+            "  Light Y:   %.4f\n"
+            "  Light Z:   %.4f\n"
+            "  ambient:   %.2f\n"
+            "  diffuse:   %.2f\n"
+            "  specular:  %.2f\n"
+            "  shininess: %.1f\n"
+            "  edlStrength: %.2f\n",
+            pc.visualizationMode, pc.hasCustomPalette,
+            (void*)classificationDescriptorSet_, pc.lodLevel,
+            cfg.lightAzimuthDeg, cfg.lightElevationDeg,
+            pc.lightDirection[0], pc.lightDirection[1], pc.lightDirection[2],
+            pc.surfaceAmbient, pc.surfaceDiffuse,
+            pc.surfaceSpecular, pc.surfaceShininess, pc.edlStrength);
     }
 
     vkCmdPushConstants(cmd, pointPipelineLayout_,
